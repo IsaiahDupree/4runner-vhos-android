@@ -33,6 +33,8 @@ database or UI.
 An OBD session is accepted only when a `gateway.handshake` identifies the physical gateway and
 asserts listen-only operation plus passive-capture capabilities. A future A/C session will require
 the sensor-node handshake and telemetry/POST capabilities. A device name is never identity proof.
+Owner-facing labels follow the stable `VHOS-4R-OBD-<suffix>` and `VHOS-4R-AC-<suffix>` contract;
+randomized BLE addresses are never presented as physical-device identity.
 
 ## Current wire baseline
 

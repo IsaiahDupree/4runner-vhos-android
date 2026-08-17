@@ -7,8 +7,9 @@ they are never proof of device identity or vehicle compatibility.
 ## OBD/CAN gateway: implemented
 
 The current development target is the MrDIY ESP32 CAN Shield gateway running the public VHOS OBD
-firmware. The observed development unit advertises as `VHOS-MRDIY-B08D14`, but Android accepts it
-by protocol contract rather than by that mutable name.
+firmware. The observed development unit formerly advertised as `VHOS-MRDIY-B08D14`; Android now
+normalizes it to canonical name `VHOS-4R-OBD-B08D14`, but accepts it by protocol contract rather
+than by that owner-facing label.
 
 | Item | Required value or behavior |
 | --- | --- |
@@ -28,6 +29,10 @@ Android performs service-filtered scanning, connects with BLE transport, discove
 service, enables all three notification streams, and only then sends the handshake request. GATT
 authentication failures trigger a bounded Android pairing/retry flow. Users should not have to
 delete the device from Bluetooth settings during normal reconnects.
+
+Canonical owner-facing names are `VHOS-4R-OBD-<MAC suffix>` and
+`VHOS-4R-AC-<MAC suffix>`. Android BLE addresses remain internal transport metadata; the complete
+handshake `gateway_id` is the immutable evidence identity.
 
 ## A/C telemetry gateway: firmware contract pending
 

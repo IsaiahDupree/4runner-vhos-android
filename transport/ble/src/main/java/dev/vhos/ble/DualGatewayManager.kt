@@ -23,6 +23,7 @@ import android.os.Looper
 import android.os.SystemClock
 import com.google.gson.Gson
 import dev.vhos.model.ConnectionPhase
+import dev.vhos.model.DeviceDisplayIdentity
 import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.IndicatorLevel
@@ -161,8 +162,8 @@ class DualGatewayManager(
         emitObd(
             ConnectionPhase.DISCOVERED,
             IndicatorLevel.ACTIVE,
-            "Candidate ${result.device.name ?: result.device.address} found at ${result.rssi} dBm; validating GATT.",
-            name = result.device.name,
+            "Candidate ${DeviceDisplayIdentity.obdName(result.device.name)} found at ${result.rssi} dBm; validating GATT.",
+            name = DeviceDisplayIdentity.obdName(result.device.name),
             address = result.device.address,
             rssi = result.rssi,
         )
@@ -509,7 +510,7 @@ private class GatewayGattConnection(
                 phase = phase,
                 level = level,
                 detail = detail,
-                deviceName = initialName,
+                deviceName = DeviceDisplayIdentity.obdName(initialName, source?.sourceId),
                 deviceAddress = device.address,
                 sourceId = source?.sourceId,
                 firmwareVersion = source?.firmwareVersion,

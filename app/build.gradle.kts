@@ -10,8 +10,8 @@ android {
         applicationId = "dev.vhos.headunit"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.1.0-dev.2"
+        versionCode = 3
+        versionName = "0.1.0-dev.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
