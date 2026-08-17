@@ -30,19 +30,26 @@ class MainActivity : Activity() {
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
     private lateinit var storageCard: TextView
+    private lateinit var releaseCard: TextView
+    private lateinit var releaseHub: ReleaseHubManager
     private var pendingExport: ByteArray? = null
     private val observer: (HeadUnitSnapshot) -> Unit = ::render
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         database = EvidenceDatabase(this)
+        releaseHub = ReleaseHubManager(this) { snapshot ->
+            runOnUiThread { renderRelease(snapshot) }
+        }
         setContentView(buildContent())
         HeadUnitRuntime.observe(observer)
         refreshCounts()
+        releaseHub.refresh()
     }
 
     override fun onDestroy() {
         HeadUnitRuntime.removeObserver(observer)
+        releaseHub.close()
         database.close()
         super.onDestroy()
     }
@@ -92,6 +99,24 @@ class MainActivity : Activity() {
         columns.addView(acCard, weightedCardParams())
         columns.addView(storageCard, weightedCardParams())
         root.addView(columns)
+
+        releaseCard = card(16f)
+        root.addView(releaseCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+        val releaseControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        releaseControls.addView(button("Refresh releases") { releaseHub.refresh() })
+        releaseControls.addView(button("Download Android APK") { releaseHub.stageAndroidUpdate() })
+        releaseControls.addView(button("Install verified APK") {
+            try { releaseHub.requestInstall(this@MainActivity) } catch (error: Exception) { showError(error) }
+        })
+        root.addView(releaseControls)
+        renderRelease(releaseHub.current())
 
         root.addView(TextView(this).apply {
             text = getString(R.string.transport_proof_disclaimer)
@@ -231,6 +256,28 @@ class MainActivity : Activity() {
         appendLine("VHOS frames: ${device.logicalFrames}  persisted: ${device.persistedFrames}")
         appendLine("Vehicle frames: ${device.vehicleFrames}  bitrate: ${device.bitrateBps ?: "—"}")
         append("CRC: ${device.crcFailures}  protocol: ${device.protocolFailures}  bus errors/off: ${device.busErrors}/${device.busOffEvents}")
+    }
+
+    private fun renderRelease(snapshot: ReleaseHubSnapshot) {
+        releaseCard.text = buildString {
+            appendLine("SIGNED RELEASE HUB  ${if (snapshot.busy) "ACTIVE" else "READY"}")
+            appendLine(snapshot.status)
+            snapshot.catalog?.artifacts?.forEach { artifact ->
+                appendLine("${artifact.target}: ${artifact.version} • ${artifact.readiness}")
+            }
+            if (snapshot.stagedApk != null) append("APK: HASH + PACKAGE + CERTIFICATE VERIFIED")
+            else append("APK: NOT STAGED")
+        }
+        releaseCard.setTextColor(
+            levelColor(
+                when {
+                    snapshot.busy -> IndicatorLevel.ACTIVE
+                    snapshot.catalog == null -> IndicatorLevel.WAIT
+                    snapshot.stagedApk != null -> IndicatorLevel.PASS
+                    else -> IndicatorLevel.CHECK
+                }
+            )
+        )
     }
 
     private fun requiredPermissions(): List<String> = buildList {

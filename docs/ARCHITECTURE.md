@@ -66,3 +66,11 @@ keyed by bundle ID and manifest SHA-256 makes replay idempotent.
 Neither app silently takes over BLE from the other. The head unit exposes **Release for iPhone**,
 which closes GATT cleanly and records the release. Android can re-acquire only after explicit owner
 action or a configured vehicle-session policy.
+
+## Release distribution
+
+Android and iPhone consume the detached-P-256-signed catalog from the separate public
+`4runner-vhos-release-hub` repository. Android verifies the APK byte count, SHA-256, package ID,
+version code, and signing-certificate SHA-256 before opening the operating system installer. The
+app never silently enables unknown-source installation. ESP32 catalog entries are visible for
+consistent fleet state, but mobile delivery cannot override firmware safety or recovery gates.

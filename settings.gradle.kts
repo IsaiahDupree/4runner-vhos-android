@@ -20,6 +20,7 @@ include(
     ":app",
     ":core:model",
     ":core:protocol",
+    ":core:release",
     ":core:sync",
     ":data:store",
     ":transport:ble",

@@ -14,8 +14,10 @@ The first vertical slice provides:
 - encrypted GATT notification subscription before handshake negotiation;
 - append-only local storage for validated raw logical frames and CAN observations;
 - real gateway, protocol, frame, error, and freshness indicators;
-- recent evidence export and checksummed Android/iPhone handoff bundles; and
-- a connected-device foreground service for an explicitly started vehicle session.
+- recent evidence export and checksummed Android/iPhone handoff bundles;
+- a connected-device foreground service for an explicitly started vehicle session; and
+- a signed public Release Hub with APK hash, package, version, and signing-certificate verification
+  before Android's owner-approved installer opens.
 
 The current OBD gateway can exercise the complete BLE path. The current A/C ESP32-S3 recovery image
 does not advertise BLE and will correctly remain `FIRMWARE NOT READY`; the app does not invent A/C
