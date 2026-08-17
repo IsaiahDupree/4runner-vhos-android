@@ -1,0 +1,14 @@
+package dev.vhos.ble
+
+import android.os.ParcelUuid
+import java.util.UUID
+
+object VhosBleUuids {
+    val SERVICE: UUID = UUID.fromString("33613EB3-FFCA-42D1-83FA-A18F12B3F123")
+    val COMMAND: UUID = UUID.fromString("B3D3279B-0244-4D54-A2AB-A1AB47A5FC0A")
+    val EVIDENCE: UUID = UUID.fromString("265B90C0-A600-4659-BBBD-5CDA411C49CC")
+    val HEALTH: UUID = UUID.fromString("BCB5699A-A9B4-49B8-B69B-D2DFF19B41A9")
+    val OTA_STATUS: UUID = UUID.fromString("18D21F8E-D190-4DB3-923C-27BBFC355874")
+    val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+    val SERVICE_PARCEL = ParcelUuid(SERVICE)
+}

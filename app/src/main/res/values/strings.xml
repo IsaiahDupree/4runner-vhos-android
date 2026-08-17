@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">4Runner VHOS</string>
+    <string name="screen_title">4Runner Vehicle Health OS</string>
+    <string name="screen_subtitle">Android head unit • dual ESP32 evidence console</string>
+    <string name="transport_proof_disclaimer">A green Bluetooth link is transport evidence only. OBD readiness also requires a validated handshake, listen-only proof, current health, and persisted vehicle frames.</string>
+    <string name="system_status_format">SYSTEM  %1$s\n%2$s</string>
+</resources>

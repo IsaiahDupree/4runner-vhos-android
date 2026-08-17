@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="vhos_background">#101418</color>
+    <color name="vhos_surface">#1A222A</color>
+    <color name="vhos_text">#F4F7FA</color>
+    <color name="vhos_muted">#AAB7C3</color>
+    <color name="vhos_accent">#45A6FF</color>
+    <color name="vhos_pass">#35D078</color>
+    <color name="vhos_check">#FFA43A</color>
+    <color name="vhos_blocked">#FF5263</color>
+</resources>

@@ -1,0 +1,78 @@
+package dev.vhos.model
+
+enum class DeviceRole(val wireValue: String, val displayName: String) {
+    OBD_CAN("OBD_CAN", "OBD / CAN gateway"),
+    AC_SENSOR("AC_SENSOR", "A/C sensor node"),
+}
+
+enum class ConnectionPhase(val displayName: String) {
+    UNAVAILABLE("Unavailable"),
+    RADIO_OFF("Bluetooth off"),
+    PERMISSION_REQUIRED("Permission required"),
+    SCANNING("Scanning"),
+    DISCOVERED("Discovered"),
+    CONNECTING("Connecting"),
+    GATT_VALIDATING("Validating GATT"),
+    PAIRING("Securing link"),
+    SUBSCRIBING("Subscribing"),
+    HANDSHAKING("Negotiating contract"),
+    STREAMING("Streaming"),
+    DEGRADED("Degraded"),
+    RECONNECTING("Reconnecting"),
+    RELEASED_FOR_EXTERNAL_CLIENT("Released for iPhone"),
+    INCOMPATIBLE("Incompatible"),
+    FIRMWARE_NOT_READY("Firmware not ready"),
+}
+
+enum class IndicatorLevel { PASS, ACTIVE, WAIT, CHECK, BLOCKED }
+
+data class DeviceSnapshot(
+    val role: DeviceRole,
+    val phase: ConnectionPhase,
+    val level: IndicatorLevel,
+    val detail: String,
+    val deviceName: String? = null,
+    val deviceAddress: String? = null,
+    val sourceId: String? = null,
+    val firmwareVersion: String? = null,
+    val rssiDbm: Int? = null,
+    val lastFrameAtEpochMs: Long? = null,
+    val logicalFrames: Long = 0,
+    val persistedFrames: Long = 0,
+    val crcFailures: Long = 0,
+    val protocolFailures: Long = 0,
+    val reconnects: Long = 0,
+    val vehicleFrames: Long = 0,
+    val busErrors: Long = 0,
+    val busOffEvents: Long = 0,
+    val listenOnly: Boolean? = null,
+    val bitrateBps: Long? = null,
+) {
+    companion object {
+        fun initial(role: DeviceRole): DeviceSnapshot = when (role) {
+            DeviceRole.OBD_CAN -> DeviceSnapshot(
+                role = role,
+                phase = ConnectionPhase.UNAVAILABLE,
+                level = IndicatorLevel.WAIT,
+                detail = "Start a vehicle session to scan for the approved gateway.",
+            )
+            DeviceRole.AC_SENSOR -> DeviceSnapshot(
+                role = role,
+                phase = ConnectionPhase.FIRMWARE_NOT_READY,
+                level = IndicatorLevel.WAIT,
+                detail = "The current A/C ESP32 recovery image does not advertise the VHOS BLE service.",
+            )
+        }
+    }
+}
+
+data class HeadUnitSnapshot(
+    val running: Boolean = false,
+    val status: String = "Vehicle session stopped.",
+    val obd: DeviceSnapshot = DeviceSnapshot.initial(DeviceRole.OBD_CAN),
+    val ac: DeviceSnapshot = DeviceSnapshot.initial(DeviceRole.AC_SENSOR),
+    val storedLogicalFrames: Long = 0,
+    val storedCanObservations: Long = 0,
+    val lastExportAtEpochMs: Long? = null,
+    val lastImportAtEpochMs: Long? = null,
+)
