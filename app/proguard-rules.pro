@@ -1,2 +1,4 @@
 -keepattributes Signature,*Annotation*
 -keep class dev.vhos.** { *; }
+-keep,includedescriptorclasses class net.zetetic.** { *; }
+-keep,includedescriptorclasses interface net.zetetic.** { *; }

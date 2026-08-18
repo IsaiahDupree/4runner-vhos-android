@@ -1,9 +1,8 @@
 package dev.vhos.store
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
 import com.google.gson.FieldNamingPolicy
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
@@ -19,6 +18,8 @@ import dev.vhos.protocol.decodeCanObservations
 import dev.vhos.sync.EvidenceBundles
 import dev.vhos.sync.ImportedEvidenceBundle
 import dev.vhos.sync.PortableEvidenceRecord
+import net.zetetic.database.sqlcipher.SQLiteDatabase
+import net.zetetic.database.sqlcipher.SQLiteOpenHelper
 import java.time.Instant
 import java.util.Base64
 import java.util.UUID
@@ -41,16 +42,29 @@ data class PersistedCanObservation(
     val observation: CanObservation,
 )
 
-class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
+class EvidenceDatabase private constructor(
+    context: Context,
+    private val databasePassphrase: ByteArray,
+    migrationState: EvidenceStoreMigrationState,
+) : SQLiteOpenHelper(
     context.applicationContext,
     DATABASE_NAME,
+    databasePassphrase,
     null,
     DATABASE_VERSION,
+    0,
+    null,
+    null,
+    true,
 ) {
+    lateinit var securityStatus: EvidenceStoreSecurity
+        private set
+
+    private val initialMigrationState = migrationState
+
     override fun onConfigure(database: SQLiteDatabase) {
         super.onConfigure(database)
         database.setForeignKeyConstraintsEnabled(true)
-        database.enableWriteAheadLogging()
     }
 
     override fun onCreate(database: SQLiteDatabase) {
@@ -656,12 +670,88 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
         .rawQuery("SELECT COUNT(*) FROM $table", null)
         .use { cursor -> cursor.moveToFirst(); cursor.getLong(0) }
 
+    @Synchronized
+    override fun close() {
+        super.close()
+        databasePassphrase.fill(0)
+        synchronized(INSTANCE_LOCK) {
+            if (instance === this) instance = null
+        }
+    }
+
     companion object {
-        private const val DATABASE_NAME = "vhos-evidence.db"
+        internal const val DATABASE_NAME = "vhos-evidence.db"
         private const val DATABASE_VERSION = 2
+        private val INSTANCE_LOCK = Any()
+        // SQLiteOpenHelper retains only the application context supplied at construction.
+        @SuppressLint("StaticFieldLeak")
+        @Volatile
+        private var instance: EvidenceDatabase? = null
         private val gson: Gson = GsonBuilder()
             .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
             .disableHtmlEscaping()
             .create()
+
+        /**
+         * Opens the single process-wide truth store. Call from a worker thread because first use may
+         * perform a verified plaintext-to-SQLCipher migration.
+         */
+        fun open(context: Context): EvidenceDatabase {
+            instance?.let { return it }
+            return synchronized(INSTANCE_LOCK) {
+                instance?.let { return@synchronized it }
+                EvidenceStoreNativeLibrary.load()
+                val passphrase = EvidenceStoreKeyManager(context).getOrCreatePassphrase(
+                    allowEnvelopeCreation = EncryptedEvidenceStoreMigrator.mayCreateKeyEnvelope(
+                        context,
+                        DATABASE_NAME,
+                    ),
+                )
+                var database: EvidenceDatabase? = null
+                try {
+                    val migrationState = EncryptedEvidenceStoreMigrator.prepare(
+                        context = context,
+                        databaseName = DATABASE_NAME,
+                        passphrase = passphrase,
+                    )
+                    database = EvidenceDatabase(context, passphrase, migrationState)
+                    val connection = database.writableDatabase
+                    val cipherVersion = connection.rawQuery(
+                        "PRAGMA cipher_version",
+                        emptyArray<String>(),
+                    ).use { cursor ->
+                        check(cursor.moveToFirst() && cursor.getString(0).isNotBlank()) {
+                            "SQLCipher did not report an active cipher version."
+                        }
+                        cursor.getString(0)
+                    }
+                    check(!EncryptedEvidenceStoreMigrator.hasPlaintextHeader(
+                        context.applicationContext.getDatabasePath(DATABASE_NAME)
+                    )) {
+                        "The live evidence database still exposes a plaintext SQLite header."
+                    }
+                    database.securityStatus = EvidenceStoreSecurity(
+                        encryptedAtRest = true,
+                        cipherVersion = cipherVersion,
+                        keyProtection = "Android Keystore AES-256-GCM envelope",
+                        keyEnvelopeVersion = EvidenceStoreKeyManager.KEY_ENVELOPE_VERSION,
+                        migrationState = database.initialMigrationState,
+                    )
+                    instance = database
+                    database
+                } catch (error: Exception) {
+                    database?.close() ?: passphrase.fill(0)
+                    throw EvidenceStoreSecurityException(
+                        "The encrypted evidence store could not be opened safely: " +
+                            (error.message ?: error.javaClass.simpleName),
+                        error,
+                    )
+                }
+            }
+        }
+
+        internal fun closeForInstrumentationTests() {
+            synchronized(INSTANCE_LOCK) { instance?.close() }
+        }
     }
 }

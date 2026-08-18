@@ -54,6 +54,8 @@ The first vertical slice provides:
   immutable evidence before showing any health state;
 - a non-destructive SQLite schema-v2 migration and owner-controlled versioned digital-twin JSON
   export;
+- SQLCipher page encryption with a Keystore-wrapped random database passphrase, deterministic
+  interrupted-migration recovery, and fail-closed evidence opening;
 - direct reconnect to the last CRC-handshake-validated gateway before any scan;
 - bounded API 33 BLE scans with named platform errors, exponential cooldown, and owner retry;
 - recent evidence export and checksummed Android/iPhone handoff bundles;
@@ -116,3 +118,6 @@ The evidence interpretation boundary and current 2,544-record baseline are docum
 The whole-vehicle model, evidence-basis rules, variant guard, and current implementation boundary
 are documented in
 [docs/WHOLE-VEHICLE-DIGITAL-TWIN.md](docs/WHOLE-VEHICLE-DIGITAL-TWIN.md).
+The encrypted local truth store, exact plaintext migration and recovery state machine, and remaining
+physical-device acceptance gate are documented in
+[docs/ENCRYPTED-EVIDENCE-STORE.md](docs/ENCRYPTED-EVIDENCE-STORE.md).

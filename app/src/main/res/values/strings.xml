@@ -5,4 +5,9 @@
     <string name="screen_subtitle">Android head unit • dual ESP32 evidence console</string>
     <string name="transport_proof_disclaimer">A green Bluetooth link is transport evidence only. OBD readiness also requires a validated handshake, listen-only proof, current health, and persisted vehicle frames.</string>
     <string name="system_status_format">SYSTEM %1$s • OWNER %2$s\n%3$s</string>
+    <string name="health_map_initializing">WHOLE-VEHICLE HEALTH MAP  INITIALIZING\nNo system is healthy until qualifying evidence establishes it.</string>
+    <string name="health_map_unavailable_format">WHOLE-VEHICLE HEALTH MAP  UNAVAILABLE\n%1$s</string>
+    <string name="can_discovery_wait">CAN DISCOVERY  WAIT\nNo persisted CAN observations have been analyzed yet.</string>
+    <string name="can_discovery_analyzing">CAN DISCOVERY  ANALYZING\nReading append-only observations…</string>
+    <string name="can_discovery_unavailable_format">CAN DISCOVERY  UNAVAILABLE\n%1$s</string>
 </resources>

@@ -45,7 +45,9 @@ import java.util.Locale
 import java.util.UUID
 
 class MainActivity : Activity() {
-    private lateinit var database: EvidenceDatabase
+    @Volatile private var database: EvidenceDatabase? = null
+    @Volatile private var storeInitializationError: String? = null
+    @Volatile private var activityDestroyed = false
     private lateinit var statusText: TextView
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
@@ -62,24 +64,44 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        database = EvidenceDatabase(this)
         releaseHub = ReleaseHubManager(this) { snapshot ->
             runOnUiThread { renderRelease(snapshot) }
         }
         setContentView(buildContent())
         HeadUnitRuntime.observe(observer)
-        refreshCounts()
-        captureHeadUnitInventory()
-        refreshDigitalTwin()
-        refreshDiscovery()
         releaseHub.refresh()
+        initializeEvidenceStore()
     }
 
     override fun onDestroy() {
+        activityDestroyed = true
         HeadUnitRuntime.removeObserver(observer)
         releaseHub.close()
-        database.close()
         super.onDestroy()
+    }
+
+    private fun initializeEvidenceStore() {
+        storeInitializationError = null
+        render(HeadUnitRuntime.snapshot())
+        Thread {
+            try {
+                database = EvidenceDatabase.open(applicationContext)
+                if (activityDestroyed) return@Thread
+                runOnUiThread {
+                    if (activityDestroyed) return@runOnUiThread
+                    render(HeadUnitRuntime.snapshot())
+                    refreshCounts()
+                    captureHeadUnitInventory()
+                    refreshDigitalTwin()
+                    refreshDiscovery()
+                }
+            } catch (error: Exception) {
+                storeInitializationError = error.message ?: error.javaClass.simpleName
+                if (!activityDestroyed) runOnUiThread {
+                    if (!activityDestroyed) render(HeadUnitRuntime.snapshot())
+                }
+            }
+        }.start()
     }
 
     private fun buildContent(): View {
@@ -136,7 +158,7 @@ class MainActivity : Activity() {
         root.addView(twinColumns)
 
         healthMapCard = card(15f).apply {
-            text = "WHOLE-VEHICLE HEALTH MAP  INITIALIZING\nNo system is healthy until qualifying evidence establishes it."
+            text = getString(R.string.health_map_initializing)
             setTextColor(levelColor(IndicatorLevel.WAIT))
         }
         root.addView(healthMapCard, LinearLayout.LayoutParams(
@@ -157,7 +179,7 @@ class MainActivity : Activity() {
         root.addView(columns)
 
         discoveryCard = card(16f).apply {
-            text = "CAN DISCOVERY  WAIT\nNo persisted CAN observations have been analyzed yet."
+            text = getString(R.string.can_discovery_wait)
             setTextColor(levelColor(IndicatorLevel.WAIT))
         }
         root.addView(discoveryCard, LinearLayout.LayoutParams(
@@ -210,9 +232,10 @@ class MainActivity : Activity() {
     }
 
     private fun prepareExport() {
+        val store = evidenceStoreOrNotify() ?: return
         Thread {
             try {
-                val records = database.recentPortableFrames()
+                val records = store.recentPortableFrames()
                 if (records.isEmpty()) throw IllegalStateException("No validated logical frames are stored yet.")
                 pendingExport = EvidenceBundles.toByteArray(
                     records = records,
@@ -262,6 +285,7 @@ class MainActivity : Activity() {
     }
 
     private fun captureHeadUnitInventory() {
+        val store = evidenceStoreOrNotify() ?: return
         val inventory = try {
             HeadUnitInventoryCollector.capture(this)
         } catch (error: Exception) {
@@ -270,7 +294,7 @@ class MainActivity : Activity() {
         }
         Thread {
             try {
-                database.persistHeadUnitInventory(inventory)
+                store.persistHeadUnitInventory(inventory)
                 refreshDigitalTwin()
             } catch (error: Exception) {
                 showError(error)
@@ -279,15 +303,19 @@ class MainActivity : Activity() {
     }
 
     private fun refreshDigitalTwin() {
+        val store = evidenceStoreOrNotify() ?: return
         Thread {
             try {
-                database.ensureInitialUnknownHealthMap()
-                val snapshot = database.digitalTwinSnapshot()
+                store.ensureInitialUnknownHealthMap()
+                val snapshot = store.digitalTwinSnapshot()
                 runOnUiThread { renderDigitalTwin(snapshot) }
             } catch (error: Exception) {
                 runOnUiThread {
                     if (::healthMapCard.isInitialized) {
-                        healthMapCard.text = "WHOLE-VEHICLE HEALTH MAP  UNAVAILABLE\n${error.message ?: error.javaClass.simpleName}"
+                        healthMapCard.text = getString(
+                            R.string.health_map_unavailable_format,
+                            error.message ?: error.javaClass.simpleName,
+                        )
                         healthMapCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
                     }
                 }
@@ -296,10 +324,11 @@ class MainActivity : Activity() {
     }
 
     private fun prepareDigitalTwinExport() {
+        val store = evidenceStoreOrNotify() ?: return
         Thread {
             try {
-                database.ensureInitialUnknownHealthMap()
-                pendingDigitalTwinExport = database.exportDigitalTwin()
+                store.ensureInitialUnknownHealthMap()
+                pendingDigitalTwinExport = store.exportDigitalTwin()
                 runOnUiThread {
                     startActivityForResult(
                         Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
@@ -336,8 +365,9 @@ class MainActivity : Activity() {
     }
 
     private fun editVehicleProfile() {
+        val store = evidenceStoreOrNotify() ?: return
         val current = try {
-            database.latestVehicleProfile()
+            store.latestVehicleProfile()
         } catch (error: Exception) {
             showError(error)
             return
@@ -435,7 +465,7 @@ class MainActivity : Activity() {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
                     Thread {
                         try {
-                            database.appendVehicleProfile(profile)
+                            store.appendVehicleProfile(profile)
                             refreshDigitalTwin()
                             runOnUiThread {
                                 dialog.dismiss()
@@ -480,11 +510,12 @@ class MainActivity : Activity() {
     }
 
     private fun readImport(uri: Uri) {
+        val store = evidenceStoreOrNotify() ?: return
         Thread {
             try {
                 val bundle = contentResolver.openInputStream(uri)?.use(EvidenceBundles::read)
                     ?: throw IllegalStateException("Android did not provide an import stream.")
-                val inserted = database.importBundle(bundle)
+                val inserted = store.importBundle(bundle)
                 HeadUnitRuntime.markImport(System.currentTimeMillis())
                 refreshCounts()
                 refreshDiscovery()
@@ -496,18 +527,20 @@ class MainActivity : Activity() {
     }
 
     private fun refreshCounts() {
-        val counts = database.counts()
+        val store = database ?: return
+        val counts = store.counts()
         HeadUnitRuntime.updateCounts(counts.logicalFrames, counts.canObservations)
     }
 
     private fun refreshDiscovery() {
+        val store = evidenceStoreOrNotify() ?: return
         if (::discoveryCard.isInitialized) {
-            discoveryCard.text = "CAN DISCOVERY  ANALYZING\nReading append-only observations…"
+            discoveryCard.text = getString(R.string.can_discovery_analyzing)
             discoveryCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
         }
         Thread {
             try {
-                val total = database.counts().canObservations
+                val total = store.counts().canObservations
                 if (total == 0L) {
                     runOnUiThread {
                         discoveryCard.text = buildString {
@@ -519,7 +552,7 @@ class MainActivity : Activity() {
                     }
                     return@Thread
                 }
-                val persisted = database.recentCanObservations(DISCOVERY_RECORD_LIMIT)
+                val persisted = store.recentCanObservations(DISCOVERY_RECORD_LIMIT)
                 val report = CanDiscoveryAnalyzer.analyze(
                     persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
                 )
@@ -529,7 +562,10 @@ class MainActivity : Activity() {
                 }
             } catch (error: Exception) {
                 runOnUiThread {
-                    discoveryCard.text = "CAN DISCOVERY  UNAVAILABLE\n${error.message ?: error.javaClass.simpleName}"
+                    discoveryCard.text = getString(
+                        R.string.can_discovery_unavailable_format,
+                        error.message ?: error.javaClass.simpleName,
+                    )
                     discoveryCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
                 }
             }
@@ -611,15 +647,36 @@ class MainActivity : Activity() {
         obdCard.setTextColor(levelColor(snapshot.obd.level))
         acCard.text = deviceText(snapshot.ac)
         acCard.setTextColor(levelColor(snapshot.ac.level))
-        storageCard.text = buildString {
-            appendLine("LOCAL EVIDENCE  ${snapshot.storedLogicalFrames} FRAMES")
-            appendLine("CAN observations: ${snapshot.storedCanObservations}")
-            appendLine("Database: append-only SQLite / WAL • schema v2")
-            appendLine("Encryption at rest: NOT YET ENABLED • app sandbox only")
-            appendLine("Export: SHA-256 manifest + NDJSON")
-            append("Last import/export: ${if (snapshot.lastImportAtEpochMs != null || snapshot.lastExportAtEpochMs != null) "RECORDED" else "NONE"}")
+        val store = database
+        val storeError = storeInitializationError
+        storageCard.text = when {
+            storeError != null -> buildString {
+                appendLine("LOCAL EVIDENCE  LOCKED")
+                appendLine("Encrypted store failed closed; no evidence was modified.")
+                append(storeError)
+            }
+            store == null -> "LOCAL EVIDENCE  SECURING\nOpening Android Keystore envelope and verifying SQLCipher pages…"
+            else -> buildString {
+                val security = store.securityStatus
+                appendLine("LOCAL EVIDENCE  ${snapshot.storedLogicalFrames} FRAMES")
+                appendLine("CAN observations: ${snapshot.storedCanObservations}")
+                appendLine("Database: append-only SQLCipher / WAL • schema v2")
+                appendLine("Encryption: ${security.cipherVersion} • KEYSTORE ENVELOPE v${security.keyEnvelopeVersion}")
+                appendLine("Key: ${security.keyProtection}")
+                appendLine("Migration: ${security.migrationState.displayName.uppercase(Locale.US)}")
+                appendLine("Export: SHA-256 manifest + NDJSON")
+                append("Last import/export: ${if (snapshot.lastImportAtEpochMs != null || snapshot.lastExportAtEpochMs != null) "RECORDED" else "NONE"}")
+            }
         }
-        storageCard.setTextColor(levelColor(IndicatorLevel.CHECK))
+        storageCard.setTextColor(
+            levelColor(
+                when {
+                    storeError != null -> IndicatorLevel.BLOCKED
+                    store == null -> IndicatorLevel.ACTIVE
+                    else -> IndicatorLevel.PASS
+                }
+            )
+        )
     }
 
     private fun renderDigitalTwin(snapshot: DigitalTwinSnapshot) {
@@ -825,6 +882,17 @@ class MainActivity : Activity() {
 
     private fun openBluetoothSettings() {
         startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+    }
+
+    private fun evidenceStoreOrNotify(): EvidenceDatabase? {
+        val store = database
+        if (store == null) {
+            showToast(
+                storeInitializationError?.let { "Encrypted evidence store unavailable: $it" }
+                    ?: "Encrypted evidence store is still being verified."
+            )
+        }
+        return store
     }
 
     private fun card(size: Float): TextView = TextView(this).apply {

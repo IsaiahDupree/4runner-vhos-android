@@ -96,16 +96,17 @@ Implemented now:
 - complete unknown-by-default health map;
 - non-destructive database v1-to-v2 migration; and
 - versioned digital-twin JSON export.
+- SQLCipher page encryption with an Android Keystore AES-256-GCM-wrapped database secret; and
+- a non-destructive, power-loss-recoverable plaintext-to-encrypted migration.
 
 Not yet implemented and therefore not presented as complete:
 
-- encrypted SQLite pages (the current database is app-sandboxed SQLite/WAL; the UI marks
-  encryption at rest as not enabled);
 - official Toyota maintenance rules and capacity/part data;
 - service, inspection, receipt, photograph, warranty, and component-life records;
 - promotion of validated CAN/J1979 signals into health assessments;
 - versioned calculation runs and forecasts; and
 - two-way iOS merge/restore for digital-twin records.
 
-The next database migration should add Keystore-wrapped database encryption before service history
-or owner documents are stored.
+The next database migration should add the append-only service/inspection/repair/part/document ledger.
+Encryption design, migration recovery, and its remaining physical-device gate are documented in
+[ENCRYPTED-EVIDENCE-STORE.md](ENCRYPTED-EVIDENCE-STORE.md).
