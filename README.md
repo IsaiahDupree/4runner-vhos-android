@@ -17,6 +17,17 @@ While the vehicle is parked:
 [Open the public Release Hub](https://isaiahdupree.github.io/4runner-vhos-release-hub/) ·
 [View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.4)
 
+## Installed in the 4Runner
+
+<p align="center">
+  <img src="docs/images/vhos-android-head-unit-installed.jpg"
+       alt="4Runner Vehicle Health OS Android app installed on the in-dash head unit"
+       width="640">
+</p>
+
+The Android head-unit app running in the vehicle with its independent OBD/CAN, A/C sensor-node,
+and local evidence states visible.
+
 Native Android client for the 4Runner Vehicle Health OS. It is deliberately separate from the
 [OBD/CAN firmware](https://github.com/IsaiahDupree/4runner-vhos-firmware), the
 [A/C telemetry node](https://github.com/IsaiahDupree/4runner-ac-telemetry-node), and the
