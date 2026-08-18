@@ -72,6 +72,12 @@ table inside the same transaction. The outer VHOS frame CRC32C, portable-record 
 capture-chunk shape, each stored record's inner CRC32C, and `listen_only=true` must all pass first.
 The original logical envelope remains the authoritative evidence; materialization never replaces it.
 
+`core:discovery` analyzes a bounded read-only snapshot of those materialized observations. Its
+`can.discovery.report@1.0.0` output separates acquisition facts from raw statistical candidates and
+does not persist a vehicle-signal meaning. The head-unit UI labels the complete section
+`CANDIDATES ONLY`; RPM, speed, gear, steering, brake, temperature, pressure, thresholds, and health
+conclusions remain unavailable until the shared Vehicle Signal Pack promotion process succeeds.
+
 Neither app silently takes over BLE from the other. The head unit exposes **Release for iPhone**,
 which closes GATT cleanly and records the release. Android can re-acquire only after explicit owner
 action or a configured vehicle-session policy.

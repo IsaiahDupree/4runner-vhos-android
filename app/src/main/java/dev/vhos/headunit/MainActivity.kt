@@ -16,6 +16,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import dev.vhos.discovery.CanDiscoveryAnalyzer
+import dev.vhos.discovery.CanDiscoveryReport
+import dev.vhos.discovery.DiscoveryObservation
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
 import dev.vhos.model.IndicatorLevel
@@ -23,6 +26,7 @@ import dev.vhos.store.EvidenceDatabase
 import dev.vhos.sync.BundleCreator
 import dev.vhos.sync.EvidenceBundles
 import java.time.Instant
+import java.util.Locale
 
 class MainActivity : Activity() {
     private lateinit var database: EvidenceDatabase
@@ -30,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
     private lateinit var storageCard: TextView
+    private lateinit var discoveryCard: TextView
     private lateinit var releaseCard: TextView
     private lateinit var releaseHub: ReleaseHubManager
     private var pendingExport: ByteArray? = null
@@ -44,6 +49,7 @@ class MainActivity : Activity() {
         setContentView(buildContent())
         HeadUnitRuntime.observe(observer)
         refreshCounts()
+        refreshDiscovery()
         releaseHub.refresh()
     }
 
@@ -103,6 +109,18 @@ class MainActivity : Activity() {
         columns.addView(acCard, weightedCardParams())
         columns.addView(storageCard, weightedCardParams())
         root.addView(columns)
+
+        discoveryCard = card(16f).apply {
+            text = "CAN DISCOVERY  WAIT\nNo persisted CAN observations have been analyzed yet."
+            setTextColor(levelColor(IndicatorLevel.WAIT))
+        }
+        root.addView(discoveryCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+        root.addView(controlRow(
+            "Analyze saved CAN" to ::refreshDiscovery,
+        ))
 
         releaseCard = card(16f)
         root.addView(releaseCard, LinearLayout.LayoutParams(
@@ -219,6 +237,7 @@ class MainActivity : Activity() {
                 val inserted = database.importBundle(bundle)
                 HeadUnitRuntime.markImport(System.currentTimeMillis())
                 refreshCounts()
+                refreshDiscovery()
                 showToast("Verified ${bundle.records.size} records; appended $inserted new frames.")
             } catch (error: Exception) {
                 showError(error)
@@ -229,6 +248,101 @@ class MainActivity : Activity() {
     private fun refreshCounts() {
         val counts = database.counts()
         HeadUnitRuntime.updateCounts(counts.logicalFrames, counts.canObservations)
+    }
+
+    private fun refreshDiscovery() {
+        if (::discoveryCard.isInitialized) {
+            discoveryCard.text = "CAN DISCOVERY  ANALYZING\nReading append-only observations…"
+            discoveryCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
+        }
+        Thread {
+            try {
+                val total = database.counts().canObservations
+                if (total == 0L) {
+                    runOnUiThread {
+                        discoveryCard.text = buildString {
+                            appendLine("CAN DISCOVERY  NO EVIDENCE")
+                            appendLine("Import a verified iPhone .vhossync bundle or capture frames directly.")
+                            append("No vehicle value is inferred while raw evidence is absent.")
+                        }
+                        discoveryCard.setTextColor(levelColor(IndicatorLevel.WAIT))
+                    }
+                    return@Thread
+                }
+                val persisted = database.recentCanObservations(DISCOVERY_RECORD_LIMIT)
+                val report = CanDiscoveryAnalyzer.analyze(
+                    persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
+                )
+                runOnUiThread {
+                    discoveryCard.text = discoveryText(report, total)
+                    discoveryCard.setTextColor(levelColor(IndicatorLevel.CHECK))
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    discoveryCard.text = "CAN DISCOVERY  UNAVAILABLE\n${error.message ?: error.javaClass.simpleName}"
+                    discoveryCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
+                }
+            }
+        }.start()
+    }
+
+    private fun discoveryText(report: CanDiscoveryReport, totalRows: Long): String = buildString {
+        val acquisition = report.acquisition
+        appendLine("CAN DISCOVERY  CANDIDATES ONLY • MODEL ${report.contractVersion}")
+        appendLine("PROVEN ACQUISITION")
+        appendLine(
+            "${acquisition.records} analyzed of $totalRows retained • " +
+                "${acquisition.sessions} sessions • ${acquisition.uniqueIdentifiers} identifiers"
+        )
+        appendLine(
+            "${acquisition.bitratesBps.joinToString { "${it / 1_000} kbit/s" }} • " +
+                "listen-only ${acquisition.listenOnlyRecords}/${acquisition.records} • " +
+                "11-bit ${acquisition.standardIdentifierRecords}/${acquisition.records} • " +
+                "RTR ${acquisition.remoteRequestRecords}"
+        )
+        appendLine(
+            "Observed-rate estimate ${decimal(acquisition.estimatedObservedRateFps)} frames/s • " +
+                "retained ${decimal(acquisition.retainedRecordRateFps)}/s • " +
+                "sampled coverage ${percent(acquisition.sequenceCoverage)}"
+        )
+        appendLine()
+        appendLine("RAW ACTIVITY — NO ASSIGNED VEHICLE MEANINGS")
+        report.identifierActivity.take(6).forEach { item ->
+            val word = item.firstBigEndianWord?.let {
+                " • raw BE16[0] ${it.minimum}–${it.maximum}"
+            }.orEmpty()
+            appendLine(
+                "${item.identifierHex} • ${item.records} records • ${item.uniquePayloads} payloads • " +
+                    "dynamic bytes ${item.dynamicBytePositions.joinToString(prefix = "[", postfix = "]")}$word"
+            )
+        }
+        val checksums = report.identifierActivity.filter { it.checksum.candidate }
+        appendLine()
+        appendLine("INTEGRITY CANDIDATES")
+        if (checksums.isEmpty()) appendLine("No additive-checksum family met the candidate gate.")
+        else appendLine(
+            "${checksums.size} IDs • ${checksums.sumOf { it.checksum.matches }}/" +
+                "${checksums.sumOf { it.checksum.checked }} candidate checksum matches"
+        )
+        report.repeatedChannels.take(2).forEach { item ->
+            appendLine(
+                "${identifierHex(item.identifier)} bytes ${item.bytePositions.joinToString()} agree across " +
+                    "${item.recordsCompared} retained records (candidate only)"
+            )
+        }
+        if (report.rawWordRelationships.isNotEmpty()) {
+            appendLine()
+            appendLine("RAW RELATIONSHIPS")
+            report.rawWordRelationships.take(3).forEach { relation ->
+                appendLine(
+                    "${identifierHex(relation.leftIdentifier)}↔${identifierHex(relation.rightIdentifier)} " +
+                        "BE16 correlation ${decimal(relation.pearsonCorrelation, 3)} • " +
+                        "${relation.pairedSamples} paired samples"
+                )
+            }
+        }
+        appendLine()
+        append("INTERPRETATION LOCK • RPM, speed, gear, throttle, steering, brake, and health thresholds remain unavailable until an independent reference capture validates exact bytes, scaling, applicability, and lineage.")
     }
 
     private fun render(snapshot: HeadUnitSnapshot) {
@@ -370,6 +484,11 @@ class MainActivity : Activity() {
         }
     )
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun decimal(value: Double, digits: Int = 1): String =
+        String.format(Locale.US, "%.${digits}f", value)
+    private fun percent(value: Double): String = String.format(Locale.US, "%.2f%%", value * 100.0)
+    private fun identifierHex(identifier: UInt): String =
+        String.format(Locale.US, "0x%03X", identifier.toInt())
     private fun showToast(message: String) = runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     private fun showError(error: Exception) = showToast(error.message ?: error.javaClass.simpleName)
 
@@ -377,5 +496,6 @@ class MainActivity : Activity() {
         private const val PERMISSION_REQUEST = 1001
         private const val EXPORT_REQUEST = 1002
         private const val IMPORT_REQUEST = 1003
+        private const val DISCOVERY_RECORD_LIMIT = 100_000
     }
 }

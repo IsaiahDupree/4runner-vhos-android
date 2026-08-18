@@ -19,6 +19,7 @@ rootProject.name = "VHOSHeadUnit"
 include(
     ":app",
     ":core:model",
+    ":core:discovery",
     ":core:protocol",
     ":core:release",
     ":core:sync",
