@@ -1,5 +1,22 @@
 # 4Runner VHOS Android head unit
 
+## Install on the head unit
+
+### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.4/app-debug.apk)
+
+Current public development build: **0.1.0-dev.4** (`app-debug.apk`, 2.6 MB). The link above
+downloads the installer directly and does not require a GitHub account.
+
+While the vehicle is parked:
+
+1. Tap **DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)** above.
+2. Approve the browser download, then open `app-debug.apk` from Downloads or the notification.
+3. If Android asks, allow this browser to **Install unknown apps**.
+4. Tap **Install**, then **Open**.
+
+[Open the public Release Hub](https://isaiahdupree.github.io/4runner-vhos-release-hub/) ·
+[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.4)
+
 Native Android client for the 4Runner Vehicle Health OS. It is deliberately separate from the
 [OBD/CAN firmware](https://github.com/IsaiahDupree/4runner-vhos-firmware), the
 [A/C telemetry node](https://github.com/IsaiahDupree/4runner-ac-telemetry-node), and the
