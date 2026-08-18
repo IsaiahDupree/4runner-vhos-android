@@ -379,6 +379,27 @@ class MainActivity : Activity() {
         appendLine("VHOS frames: ${device.logicalFrames}  persisted: ${device.persistedFrames}")
         appendLine("Vehicle frames: ${device.vehicleFrames}  bitrate: ${device.bitrateBps ?: "—"}")
         appendLine("CRC: ${device.crcFailures}  protocol: ${device.protocolFailures}  bus errors/off: ${device.busErrors}/${device.busOffEvents}")
+        if (device.role == dev.vhos.model.DeviceRole.OBD_CAN) {
+            appendLine(
+                "J1979 ECUs: ${device.j1979EcuCount}  enumeration: " +
+                    when (device.j1979EnumerationComplete) {
+                        true -> "COMPLETE"
+                        false -> "INCOMPLETE"
+                        null -> "NO EVIDENCE"
+                    } + "  supported PIDs: ${device.j1979SupportedPidCount}"
+            )
+            if (device.standardObdReadings.isEmpty()) {
+                appendLine("Standard OBD: unavailable until supported-PID evidence is complete.")
+            } else {
+                appendLine("STANDARD READ-ONLY OBD")
+                device.standardObdReadings.take(8).forEach { reading ->
+                    appendLine(
+                        "${reading.name}: ${decimal(reading.value, 2)} ${reading.unit} " +
+                            "(${reading.ecuAddress}/PID ${String.format(Locale.US, "%02X", reading.pid)})"
+                    )
+                }
+            }
+        }
         if (device.transportErrorName != null || device.platformErrorCode != null) {
             appendLine(
                 "Android transport: ${device.transportErrorName ?: "UNKNOWN"}" +

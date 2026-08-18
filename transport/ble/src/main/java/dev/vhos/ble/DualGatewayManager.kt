@@ -30,8 +30,11 @@ import dev.vhos.model.DeviceDisplayIdentity
 import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.IndicatorLevel
+import dev.vhos.model.StandardObdReading
 import dev.vhos.protocol.FrameStreamDecoder
 import dev.vhos.protocol.GatewayFrame
+import dev.vhos.protocol.J1979Accumulator
+import dev.vhos.protocol.J1979ResponseEvidence
 import dev.vhos.protocol.MessageType
 import dev.vhos.protocol.PayloadContracts
 import dev.vhos.protocol.PayloadException
@@ -553,6 +556,7 @@ private class GatewayGattConnection(
     private var lastFrameAt: Long? = null
     private var reconnectCount = 0L
     private var descriptorSecurityRetries = 0
+    private val j1979Accumulator = J1979Accumulator()
 
     fun connect(reconnects: Long) {
         reconnectCount = reconnects
@@ -906,6 +910,24 @@ private class GatewayGattConnection(
                 busOffEvents = health.busOffCount
                 bitrateBps = health.canBitrateBps
             }
+            MessageType.DIAGNOSTIC_RESPONSE -> {
+                val response = try {
+                    J1979ResponseEvidence.decodePassiveWire(
+                        payload = frame.payload,
+                        gatewayId = source.sourceId,
+                        observedAt = Instant.now().toString(),
+                    )
+                } catch (error: IllegalArgumentException) {
+                    protocolFailures++
+                    return fail(error.message ?: "J1979 response evidence failed validation.")
+                }
+                try {
+                    j1979Accumulator.ingest(response)
+                } catch (error: IllegalArgumentException) {
+                    protocolFailures++
+                    return fail(error.message ?: "J1979 supported-PID/value decoding failed validation.")
+                }
+            }
             else -> Unit
         }
         emit(ConnectionPhase.STREAMING, IndicatorLevel.PASS, "Validated evidence is streaming and persisted locally.")
@@ -942,6 +964,7 @@ private class GatewayGattConnection(
         val source = identity
         val role = source?.role ?: expectedSource?.role ?: roleHint
         val sourceId = source?.sourceId ?: expectedSource?.sourceId
+        val availability = j1979Accumulator.availability
         callback.snapshot(
             DeviceSnapshot(
                 role = role,
@@ -967,6 +990,30 @@ private class GatewayGattConnection(
                 busOffEvents = busOffEvents,
                 listenOnly = source?.listenOnly,
                 bitrateBps = bitrateBps,
+                j1979EcuCount = availability.size,
+                j1979EnumerationComplete = availability.takeIf { it.isNotEmpty() }
+                    ?.all { it.enumerationComplete },
+                j1979SupportedPidCount = availability.sumOf { it.supportedPids.size },
+                standardObdReadings = j1979Accumulator.standardSamples
+                    .groupBy { "${it.ecuAddress}:${it.signalId}" }
+                    .mapNotNull { (_, samples) ->
+                        samples.maxByOrNull { it.gatewayMonotonicMicroseconds }
+                    }
+                    .sortedBy { it.signalId }
+                    .map { sample ->
+                        StandardObdReading(
+                            ecuAddress = sample.ecuAddress,
+                            pid = sample.pid,
+                            signalId = sample.signalId,
+                            name = sample.name,
+                            value = sample.value,
+                            unit = sample.unit,
+                            observedAt = sample.observedAt,
+                            gatewayMonotonicMicroseconds = sample.gatewayMonotonicMicroseconds,
+                            sourceSequence = sample.sourceSequence,
+                            definitionRevision = sample.definitionRevision,
+                        )
+                    },
             )
         )
     }

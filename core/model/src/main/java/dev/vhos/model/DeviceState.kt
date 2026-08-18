@@ -28,6 +28,19 @@ enum class ConnectionPhase(val displayName: String) {
 
 enum class IndicatorLevel { PASS, ACTIVE, WAIT, CHECK, BLOCKED }
 
+data class StandardObdReading(
+    val ecuAddress: String,
+    val pid: Int,
+    val signalId: String,
+    val name: String,
+    val value: Double,
+    val unit: String,
+    val observedAt: String,
+    val gatewayMonotonicMicroseconds: ULong,
+    val sourceSequence: ULong,
+    val definitionRevision: String,
+)
+
 data class DeviceSnapshot(
     val role: DeviceRole,
     val phase: ConnectionPhase,
@@ -53,6 +66,10 @@ data class DeviceSnapshot(
     val transportErrorName: String? = null,
     val recoveryAttempt: Int = 0,
     val nextRetryAtEpochMs: Long? = null,
+    val j1979EcuCount: Int = 0,
+    val j1979EnumerationComplete: Boolean? = null,
+    val j1979SupportedPidCount: Int = 0,
+    val standardObdReadings: List<StandardObdReading> = emptyList(),
 ) {
     companion object {
         fun initial(role: DeviceRole): DeviceSnapshot = when (role) {

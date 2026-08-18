@@ -44,6 +44,8 @@ The first vertical slice provides:
   transactional materialization of CRC-valid persistent capture records;
 - a versioned CAN Discovery dashboard for acquisition facts, sampled coverage, raw activity,
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
+- passive SAE J1979 Mode 01 response decoding, per-ECU supported-PID continuation tracking, and
+  pinned standard read-only values that remain unavailable until support is proven;
 - real gateway, protocol, frame, error, and freshness indicators;
 - direct reconnect to the last CRC-handshake-validated gateway before any scan;
 - bounded API 33 BLE scans with named platform errors, exponential cooldown, and owner retry;
@@ -59,6 +61,30 @@ data while that firmware milestone is pending.
 The deployed OBD firmware sends every framed response type over one encrypted multiplexed stream
 characteristic. Android enables exactly that one CCCD before requesting the handshake; the separate
 health and OTA characteristics remain registered for GATT compatibility but are not subscribed.
+
+## Standard read-only OBD evidence
+
+Firmware `0.1.0-dev.30` adds a separate, CRC-protected diagnostic-response record without replacing
+the original raw CAN observation. Android persists that raw logical record before interpreting it,
+groups Mode 01 supported-PID bitmaps by responding ECU, follows advertised `00/20/40/...`
+continuations, and then projects only proven supported values from the pinned definition registry.
+Missing, incomplete, malformed, or unsupported values remain unavailable; they are never rendered as
+numeric zero.
+
+Every standard value retains the firmware capture ID, gateway monotonic timestamp, and original CAN
+source sequence. Availability state is reset when gateway, capture, or transport identity changes,
+so a new drive cannot inherit a prior drive's supported-PID proof.
+
+The current standard display covers calculated load, coolant temperature, short- and long-term fuel
+trim, fuel pressure, intake pressure, engine speed, vehicle speed, ignition timing, intake-air
+temperature, air flow, throttle position, and engine run time when the corresponding ECU evidence is
+present. The ESP32 remains in TWAI listen-only mode and Android has no diagnostic transmit API.
+During this milestone, responses are observed when an approved external client such as Toyota
+Techstream issues the read-only requests.
+
+The synchronized Toyota-reference procedure and private iPhone evidence-outbox contract are recorded
+in the product repository's
+[J1979/reference/outbox implementation record](https://github.com/IsaiahDupree/4runner-vehicle-health-os/blob/agent/ios-hardware-foundation/docs/development/J1979-REFERENCE-VALIDATION-AND-PRIVATE-OUTBOX-2026-08-18.md).
 
 ## Build
 
