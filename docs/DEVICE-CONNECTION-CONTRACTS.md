@@ -15,20 +15,24 @@ than by that owner-facing label.
 | --- | --- |
 | BLE service | `33613EB3-FFCA-42D1-83FA-A18F12B3F123` |
 | Command characteristic | `B3D3279B-0244-4D54-A2AB-A1AB47A5FC0A` |
-| Evidence notification | `265B90C0-A600-4659-BBBD-5CDA411C49CC` |
-| Health notification | `BCB5699A-A9B4-49B8-B69B-D2DFF19B41A9` |
-| OTA-status notification | `18D21F8E-D190-4DB3-923C-27BBFC355874` |
+| Multiplexed stream notification | `265B90C0-A600-4659-BBBD-5CDA411C49CC`; the only CCCD Android enables |
+| Registered compatibility characteristic | `BCB5699A-A9B4-49B8-B69B-D2DFF19B41A9`; health frames arrive on the multiplexed stream |
+| Registered compatibility characteristic | `18D21F8E-D190-4DB3-923C-27BBFC355874`; OTA frames arrive on the multiplexed stream |
 | Envelope | 36-byte little-endian `VHOS` header plus bounded payload |
 | Integrity | header CRC32C and payload CRC32C must pass |
 | Identity | `gateway.handshake` contract version `1.0.0` |
 | Required capabilities | `capture.passive`, `evidence.export` |
 | Safety proof | handshake and live health both report `listen_only=true` |
-| Readiness proof | validated identity, all notification subscriptions, fresh health, persisted evidence |
+| Readiness proof | validated identity, the current-link stream subscription, fresh health, persisted evidence |
 
 Android performs service-filtered scanning, connects with BLE transport, discovers the complete
-service, enables all three notification streams, and only then sends the handshake request. GATT
-authentication failures trigger a bounded Android pairing/retry flow. Users should not have to
-delete the device from Bluetooth settings during normal reconnects.
+service, validates that the compatibility characteristics remain registered, enables exactly one
+encrypted multiplexed stream CCCD, and only then sends the handshake request. Evidence, health,
+capture-log, and OTA frames remain independently typed and CRC-protected inside that stream. This
+matches the physically accepted iPhone/firmware baseline and avoids the multi-CCCD pairing failure
+that previously exhausted the ESP32 BLE host. GATT authentication failures trigger a bounded
+Android pairing/retry flow. Users should not have to delete the device from Bluetooth settings
+during normal reconnects.
 
 Canonical owner-facing names are `VHOS-4R-OBD-<MAC suffix>` and
 `VHOS-4R-AC-<MAC suffix>`. Android BLE addresses remain internal transport metadata; the complete
@@ -63,7 +67,10 @@ documented session policy.
 For durable synchronization, either app can create a `.vhossync` bundle. The stored ZIP contains a
 manifest and NDJSON segments. Import verifies safe paths, ZIP CRC, segment SHA-256, record counts,
 complete VHOS envelope CRC32C, source metadata, and per-envelope SHA-256 before append-only storage.
-Bundle ID plus manifest hash makes repeated import idempotent.
+Bundle ID plus manifest hash makes repeated import idempotent. Validated live-CAN and capture-log
+chunk envelopes are additionally decoded into Android's append-only CAN-observation table; every
+stored capture record must pass its inner CRC32C and retain `listen_only=true` before the import
+transaction commits.
 
 ## Android head-unit baseline
 

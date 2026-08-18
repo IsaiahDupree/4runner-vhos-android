@@ -60,6 +60,56 @@ data class CanObservation(
     }
 }
 
+data class CaptureLogChunk(
+    val slot: Int,
+    val endOfFile: Boolean,
+    val recordOffset: UInt,
+    val sessionId: UInt,
+    val records: List<CanObservation>,
+) {
+    companion object {
+        private const val HEADER_BYTES = 16
+
+        fun decode(payload: ByteArray): CaptureLogChunk {
+            if (payload.size < HEADER_BYTES || payload[0].toInt() != 1) {
+                throw PayloadException("Capture-log chunk header is invalid.")
+            }
+            val count = payload.u16(8)
+            val recordBytes = payload.u16(10)
+            if (recordBytes != CanObservation.RECORD_BYTES) {
+                throw PayloadException("Unsupported capture record size: $recordBytes.")
+            }
+            val expectedBytes = HEADER_BYTES + count * recordBytes
+            if (payload.size != expectedBytes) {
+                throw PayloadException(
+                    "Capture-log chunk length mismatch: expected $expectedBytes, received ${payload.size}."
+                )
+            }
+            val sessionId = payload.u32(12)
+            val records = (0 until count).map { index ->
+                val offset = HEADER_BYTES + index * recordBytes
+                CanObservation.decodeStored(
+                    payload.copyOfRange(offset, offset + recordBytes),
+                    sessionId,
+                )
+            }
+            return CaptureLogChunk(
+                slot = payload[1].toUByte().toInt(),
+                endOfFile = payload[2].toInt() == 1,
+                recordOffset = payload.u32(4),
+                sessionId = sessionId,
+                records = records,
+            )
+        }
+    }
+}
+
+fun GatewayFrame.decodeCanObservations(): List<CanObservation> = when (messageType) {
+    MessageType.RAW_CAN_FRAME -> listOf(CanObservation.decodeLive(payload))
+    MessageType.CAPTURE_LOG_CHUNK -> CaptureLogChunk.decode(payload).records
+    else -> emptyList()
+}
+
 data class CaptureLogRequest(
     val operation: Operation,
     val slot: Int = 0,

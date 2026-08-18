@@ -12,7 +12,8 @@ The first vertical slice provides:
 - independent OBD/CAN and A/C device state;
 - exact 36-byte `VHOS` frame validation with header and payload CRC32C;
 - encrypted GATT notification subscription before handshake negotiation;
-- append-only local storage for validated raw logical frames and CAN observations;
+- append-only local storage for validated raw logical frames and CAN observations, including
+  transactional materialization of CRC-valid persistent capture records;
 - real gateway, protocol, frame, error, and freshness indicators;
 - recent evidence export and checksummed Android/iPhone handoff bundles;
 - a connected-device foreground service for an explicitly started vehicle session; and
@@ -22,6 +23,10 @@ The first vertical slice provides:
 The current OBD gateway can exercise the complete BLE path. The current A/C ESP32-S3 recovery image
 does not advertise BLE and will correctly remain `FIRMWARE NOT READY`; the app does not invent A/C
 data while that firmware milestone is pending.
+
+The deployed OBD firmware sends every framed response type over one encrypted multiplexed stream
+characteristic. Android enables exactly that one CCCD before requesting the handshake; the separate
+health and OTA characteristics remain registered for GATT compatibility but are not subscribed.
 
 ## Build
 

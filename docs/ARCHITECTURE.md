@@ -26,9 +26,11 @@ A/C ESP32-S3   -- encrypted BLE --/             |       -- VHOS sync bundle
 ```
 
 `DualGatewayManager` discovers the public VHOS service once and owns a connection object per
-physical device. Each connection reassembles transport chunks independently. A complete frame must
-pass magic, protocol-major, size, header CRC32C, and payload CRC32C checks before it reaches the
-database or UI.
+physical device. Each connection enables the one encrypted stream CCCD used by the deployed
+firmware; evidence, health, capture, and OTA remain separate framed message types within that
+stream. Each connection reassembles transport chunks independently. A complete frame must pass
+magic, protocol-major, size, header CRC32C, and payload CRC32C checks before it reaches the database
+or UI.
 
 An OBD session is accepted only when a `gateway.handshake` identifies the physical gateway and
 asserts listen-only operation plus passive-capture capabilities. A future A/C session will require
@@ -64,6 +66,11 @@ The manifest declares the creator platform/app version, bundle ID, creation time
 media type, byte count, record count, and SHA-256. Import verifies safe relative paths, exact byte
 counts, exact hashes, and exact record counts before an append-only transaction. An import receipt
 keyed by bundle ID and manifest SHA-256 makes replay idempotent.
+
+Imported live-CAN frames and persistent capture-log chunks are materialized into the CAN-observation
+table inside the same transaction. The outer VHOS frame CRC32C, portable-record envelope SHA-256,
+capture-chunk shape, each stored record's inner CRC32C, and `listen_only=true` must all pass first.
+The original logical envelope remains the authoritative evidence; materialization never replaces it.
 
 Neither app silently takes over BLE from the other. The head unit exposes **Release for iPhone**,
 which closes GATT cleanly and records the release. Android can re-acquire only after explicit owner

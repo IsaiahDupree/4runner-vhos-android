@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import dev.vhos.model.DeviceRole
 import dev.vhos.protocol.CanObservation
 import dev.vhos.protocol.GatewayFrame
+import dev.vhos.protocol.decodeCanObservations
 import dev.vhos.sync.EvidenceBundles
 import dev.vhos.sync.ImportedEvidenceBundle
 import dev.vhos.sync.PortableEvidenceRecord
@@ -155,6 +156,13 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
         sourceId: String,
         observation: CanObservation,
         ingestedAt: Instant = Instant.now(),
+    ): Boolean = insertCanObservation(writableDatabase, sourceId, observation, ingestedAt)
+
+    private fun insertCanObservation(
+        database: SQLiteDatabase,
+        sourceId: String,
+        observation: CanObservation,
+        ingestedAt: Instant,
     ): Boolean {
         val values = ContentValues().apply {
             put("source_id", sourceId)
@@ -170,7 +178,7 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
             put("data", observation.data)
             put("ingested_at", ingestedAt.toString())
         }
-        return writableDatabase.insertWithOnConflict(
+        return database.insertWithOnConflict(
             "can_observations", null, values, SQLiteDatabase.CONFLICT_IGNORE
         ) != -1L
     }
@@ -260,6 +268,29 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
                         "logical_frames", null, values, SQLiteDatabase.CONFLICT_IGNORE
                     ) != -1L
                 ) inserted++
+                if (role == DeviceRole.OBD_CAN) {
+                    val evidenceIngestedAt = try {
+                        Instant.parse(record.ingestedAt)
+                    } catch (error: RuntimeException) {
+                        throw IllegalArgumentException(
+                            "Portable evidence record has an invalid ingestion timestamp.",
+                            error,
+                        )
+                    }
+                    frame.decodeCanObservations().forEach { observation ->
+                        if (!observation.listenOnly) {
+                            throw IllegalArgumentException(
+                                "Imported CAN evidence does not retain listen-only proof."
+                            )
+                        }
+                        insertCanObservation(
+                            database,
+                            record.sourceId,
+                            observation,
+                            evidenceIngestedAt,
+                        )
+                    }
+                }
             }
             database.insertOrThrow("import_receipts", null, ContentValues().apply {
                 put("bundle_id", bundle.manifest.bundleId)

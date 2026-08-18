@@ -27,13 +27,13 @@ import dev.vhos.model.DeviceDisplayIdentity
 import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.IndicatorLevel
-import dev.vhos.protocol.CanObservation
 import dev.vhos.protocol.FrameStreamDecoder
 import dev.vhos.protocol.GatewayFrame
 import dev.vhos.protocol.MessageType
 import dev.vhos.protocol.PayloadContracts
 import dev.vhos.protocol.PayloadException
 import dev.vhos.protocol.ValidatedIdentity
+import dev.vhos.protocol.decodeCanObservations
 import dev.vhos.store.EvidenceDatabase
 import dev.vhos.store.PersistedSource
 import java.time.Instant
@@ -310,17 +310,22 @@ private class GatewayGattConnection(
         if (!writable) return fail("VHOS command characteristic does not support reliable writes.")
         descriptorQueue.clear()
         listOf(evidence, health, ota).forEach { characteristic ->
-            val notifiable = characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-            if (!notifiable) return fail("Required characteristic ${characteristic.uuid} cannot notify.")
-            if (!gatt.setCharacteristicNotification(characteristic, true)) {
-                return fail("Android rejected notification setup for ${characteristic.uuid}.")
+            if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY == 0) {
+                return fail("Required characteristic ${characteristic.uuid} cannot notify.")
             }
-            val descriptor = characteristic.getDescriptor(VhosBleUuids.CCCD)
-                ?: return fail("Required CCCD is absent for ${characteristic.uuid}.")
-            descriptorQueue.add(descriptor)
-            decoders[characteristic.uuid] = FrameStreamDecoder()
         }
-        emit(ConnectionPhase.SUBSCRIBING, IndicatorLevel.ACTIVE, "Enabling encrypted evidence, health, and OTA notifications.")
+        if (!gatt.setCharacteristicNotification(evidence, true)) {
+            return fail("Android rejected notification setup for the VHOS multiplexed stream.")
+        }
+        val descriptor = evidence.getDescriptor(VhosBleUuids.CCCD)
+            ?: return fail("Required stream CCCD is absent from the VHOS evidence characteristic.")
+        descriptorQueue.add(descriptor)
+        decoders[evidence.uuid] = FrameStreamDecoder()
+        emit(
+            ConnectionPhase.SUBSCRIBING,
+            IndicatorLevel.ACTIVE,
+            "Enabling the single encrypted stream for evidence, health, capture, and OTA frames.",
+        )
         writeNextDescriptor(gatt)
     }
 
@@ -469,16 +474,21 @@ private class GatewayGattConnection(
         }
         if (database.persistFrame(source.sourceId, source.role, frame, frame.encode())) persistedFrames++
         when (frame.messageType) {
-            MessageType.RAW_CAN_FRAME -> {
-                val observation = try {
-                    CanObservation.decodeLive(frame.payload)
+            MessageType.RAW_CAN_FRAME, MessageType.CAPTURE_LOG_CHUNK -> {
+                val observations = try {
+                    frame.decodeCanObservations()
                 } catch (error: PayloadException) {
                     protocolFailures++
-                    return fail(error.message ?: "Live CAN record failed validation.")
+                    return fail(error.message ?: "CAN evidence failed validation.")
                 }
-                if (!observation.listenOnly) return fail("Live CAN record does not retain listen-only proof.")
-                if (database.persistCanObservation(source.sourceId, observation)) vehicleFrames++
-                bitrateBps = observation.bitrateBps.toLong()
+                observations.forEach { observation ->
+                    if (!observation.listenOnly) {
+                        return fail("CAN evidence does not retain listen-only proof.")
+                    }
+                    val inserted = database.persistCanObservation(source.sourceId, observation)
+                    if (inserted && frame.messageType == MessageType.RAW_CAN_FRAME) vehicleFrames++
+                    bitrateBps = observation.bitrateBps.toLong()
+                }
             }
             MessageType.GATEWAY_HEALTH -> {
                 val health = try {
