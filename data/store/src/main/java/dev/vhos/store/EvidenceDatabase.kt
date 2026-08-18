@@ -27,6 +27,11 @@ data class PersistedSource(
     val validatedAt: String,
 )
 
+data class PersistedCanObservation(
+    val sourceId: String,
+    val observation: CanObservation,
+)
+
 class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
     context.applicationContext,
     DATABASE_NAME,
@@ -218,6 +223,50 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
         logicalFrames = scalarCount("logical_frames"),
         canObservations = scalarCount("can_observations"),
     )
+
+    @Synchronized
+    fun recentCanObservations(limit: Int = 100_000): List<PersistedCanObservation> {
+        require(limit in 1..100_000)
+        val observations = mutableListOf<PersistedCanObservation>()
+        readableDatabase.query(
+            "can_observations",
+            arrayOf(
+                "source_id", "session_id", "source_sequence", "source_monotonic_us",
+                "bitrate_bps", "identifier", "extended", "remote_request", "listen_only",
+                "data_length", "data",
+            ),
+            null,
+            null,
+            null,
+            null,
+            "id DESC",
+            limit.toString(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val dataLength = cursor.getInt(9)
+                val data = cursor.getBlob(10)
+                require(dataLength in 0..8 && data.size == 8) {
+                    "Persisted CAN observation payload shape is invalid."
+                }
+                observations += PersistedCanObservation(
+                    sourceId = cursor.getString(0),
+                    observation = CanObservation(
+                        sessionId = cursor.getString(1).toUInt(),
+                        sourceSequence = cursor.getString(2).toULong(),
+                        monotonicMicroseconds = cursor.getString(3).toULong(),
+                        bitrateBps = cursor.getInt(4),
+                        identifier = cursor.getLong(5).toUInt(),
+                        extended = cursor.getInt(6) == 1,
+                        remoteRequest = cursor.getInt(7) == 1,
+                        listenOnly = cursor.getInt(8) == 1,
+                        dataLength = dataLength,
+                        data = data,
+                    ),
+                )
+            }
+        }
+        return observations.asReversed()
+    }
 
     @Synchronized
     fun recentPortableFrames(limit: Int = 20_000): List<PortableEvidenceRecord> {
