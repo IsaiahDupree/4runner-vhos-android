@@ -4,6 +4,14 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.google.gson.FieldNamingPolicy
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import dev.vhos.digitaltwin.DigitalTwinSnapshot
+import dev.vhos.digitaltwin.HeadUnitInventory
+import dev.vhos.digitaltwin.HealthAssessment
+import dev.vhos.digitaltwin.VehicleProfile
+import dev.vhos.digitaltwin.VehicleSystem
 import dev.vhos.model.DeviceRole
 import dev.vhos.protocol.CanObservation
 import dev.vhos.protocol.GatewayFrame
@@ -13,6 +21,7 @@ import dev.vhos.sync.ImportedEvidenceBundle
 import dev.vhos.sync.PortableEvidenceRecord
 import java.time.Instant
 import java.util.Base64
+import java.util.UUID
 
 data class EvidenceCounts(
     val logicalFrames: Long,
@@ -110,11 +119,69 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
         )
         database.execSQL("CREATE INDEX logical_frames_ingested ON logical_frames(ingested_at)")
         database.execSQL("CREATE INDEX can_observations_source_sequence ON can_observations(source_id, source_sequence)")
+        createDigitalTwinTables(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        throw IllegalStateException(
+        var migratedVersion = oldVersion
+        if (migratedVersion == 1) {
+            createDigitalTwinTables(database)
+            migratedVersion = 2
+        }
+        check(migratedVersion == newVersion) {
             "Evidence database migration $oldVersion -> $newVersion is not implemented; destructive migration is forbidden."
+        }
+    }
+
+    private fun createDigitalTwinTables(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS head_unit_inventory (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              inventory_id TEXT NOT NULL UNIQUE,
+              inventory_fingerprint TEXT NOT NULL UNIQUE,
+              inventory_json TEXT NOT NULL,
+              captured_at TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS vehicle_profiles (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              revision_id TEXT NOT NULL UNIQUE,
+              supersedes_revision_id TEXT,
+              profile_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(supersedes_revision_id) REFERENCES vehicle_profiles(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS health_assessments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              assessment_id TEXT NOT NULL UNIQUE,
+              supersedes_assessment_id TEXT,
+              profile_revision_id TEXT,
+              system_id TEXT NOT NULL,
+              health_state TEXT NOT NULL,
+              evidence_basis TEXT NOT NULL,
+              assessment_json TEXT NOT NULL,
+              recorded_at TEXT NOT NULL,
+              FOREIGN KEY(supersedes_assessment_id) REFERENCES health_assessments(assessment_id),
+              FOREIGN KEY(profile_revision_id) REFERENCES vehicle_profiles(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS head_unit_inventory_captured ON head_unit_inventory(captured_at)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS vehicle_profiles_created ON vehicle_profiles(created_at)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS health_assessments_system ON health_assessments(system_id, id)"
         )
     }
 
@@ -159,6 +226,192 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
         }
         return latestByRole.values.toList()
     }
+
+    @Synchronized
+    fun persistHeadUnitInventory(inventory: HeadUnitInventory): Boolean {
+        inventory.validate()
+        val inventoryJson = gson.toJson(inventory)
+        val fingerprintJson = gson.toJson(
+            inventory.copy(
+                inventoryId = "00000000-0000-0000-0000-000000000000",
+                capturedAt = "1970-01-01T00:00:00Z",
+            )
+        )
+        return writableDatabase.insertWithOnConflict(
+            "head_unit_inventory",
+            null,
+            ContentValues().apply {
+                put("inventory_id", inventory.inventoryId)
+                put("inventory_fingerprint", EvidenceBundles.sha256(fingerprintJson.toByteArray()))
+                put("inventory_json", inventoryJson)
+                put("captured_at", inventory.capturedAt)
+            },
+            SQLiteDatabase.CONFLICT_IGNORE,
+        ) != -1L
+    }
+
+    @Synchronized
+    fun latestHeadUnitInventory(): HeadUnitInventory? = readableDatabase.query(
+        "head_unit_inventory",
+        arrayOf("inventory_json"),
+        null, null, null, null, "id DESC", "1",
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null
+        else gson.fromJson(cursor.getString(0), HeadUnitInventory::class.java).validate()
+    }
+
+    @Synchronized
+    fun appendVehicleProfile(profile: VehicleProfile) {
+        profile.validate()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val previous = latestVehicleProfile(database)
+            require(profile.supersedesRevisionId == previous?.revisionId) {
+                "Vehicle-profile revisions must append to the current revision."
+            }
+            database.insertOrThrow("vehicle_profiles", null, ContentValues().apply {
+                put("revision_id", profile.revisionId)
+                if (profile.supersedesRevisionId == null) putNull("supersedes_revision_id")
+                else put("supersedes_revision_id", profile.supersedesRevisionId)
+                put("profile_json", gson.toJson(profile))
+                put("created_at", profile.createdAt)
+            })
+            appendUnknownHealthBaseline(database, profile.revisionId, profile.createdAt)
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun latestVehicleProfile(): VehicleProfile? = latestVehicleProfile(readableDatabase)
+
+    private fun latestVehicleProfile(database: SQLiteDatabase): VehicleProfile? = database.query(
+        "vehicle_profiles",
+        arrayOf("profile_json"),
+        null, null, null, null, "id DESC", "1",
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null
+        else gson.fromJson(cursor.getString(0), VehicleProfile::class.java).validate()
+    }
+
+    @Synchronized
+    fun ensureInitialUnknownHealthMap(recordedAt: Instant = Instant.now()) {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val latest = latestHealthAssessments(database)
+            VehicleSystem.entries.filterNot { it in latest }.forEach { system ->
+                insertHealthAssessment(
+                    database,
+                    HealthAssessment.unknown(
+                        system = system,
+                        profileRevisionId = latestVehicleProfile(database)?.revisionId,
+                        recordedAt = recordedAt.toString(),
+                    ),
+                )
+            }
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun appendHealthAssessment(assessment: HealthAssessment) {
+        assessment.validate()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val previous = latestHealthAssessments(database)[assessment.systemId]
+            require(assessment.supersedesAssessmentId == previous?.assessmentId) {
+                "Health assessments must append to the current system assessment."
+            }
+            require(assessment.profileRevisionId == latestVehicleProfile(database)?.revisionId) {
+                "Health assessment must reference the current vehicle-profile revision."
+            }
+            insertHealthAssessment(database, assessment)
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun latestHealthAssessments(): List<HealthAssessment> =
+        latestHealthAssessments(readableDatabase).values.sortedBy { it.systemId.ordinal }
+
+    private fun latestHealthAssessments(database: SQLiteDatabase): Map<VehicleSystem, HealthAssessment> {
+        val latest = linkedMapOf<VehicleSystem, HealthAssessment>()
+        database.query(
+            "health_assessments",
+            arrayOf("system_id", "assessment_json"),
+            null, null, null, null, "id DESC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val system = VehicleSystem.entries.firstOrNull { it.name == cursor.getString(0) }
+                    ?: throw IllegalStateException("Stored health assessment has an unknown system ID.")
+                if (system !in latest) {
+                    latest[system] = gson.fromJson(
+                        cursor.getString(1),
+                        HealthAssessment::class.java,
+                    ).validate()
+                }
+            }
+        }
+        return latest
+    }
+
+    private fun appendUnknownHealthBaseline(
+        database: SQLiteDatabase,
+        profileRevisionId: String,
+        recordedAt: String,
+    ) {
+        val previous = latestHealthAssessments(database)
+        VehicleSystem.entries.forEach { system ->
+            insertHealthAssessment(
+                database,
+                HealthAssessment.unknown(
+                    system = system,
+                    profileRevisionId = profileRevisionId,
+                    supersedesAssessmentId = previous[system]?.assessmentId,
+                    recordedAt = recordedAt,
+                ),
+            )
+        }
+    }
+
+    private fun insertHealthAssessment(database: SQLiteDatabase, assessment: HealthAssessment) {
+        assessment.validate()
+        database.insertOrThrow("health_assessments", null, ContentValues().apply {
+            put("assessment_id", assessment.assessmentId)
+            if (assessment.supersedesAssessmentId == null) putNull("supersedes_assessment_id")
+            else put("supersedes_assessment_id", assessment.supersedesAssessmentId)
+            if (assessment.profileRevisionId == null) putNull("profile_revision_id")
+            else put("profile_revision_id", assessment.profileRevisionId)
+            put("system_id", assessment.systemId.name)
+            put("health_state", assessment.state.name)
+            put("evidence_basis", assessment.basis.name)
+            put("assessment_json", gson.toJson(assessment))
+            put("recorded_at", assessment.recordedAt)
+        })
+    }
+
+    @Synchronized
+    fun digitalTwinSnapshot(exportedAt: Instant = Instant.now()): DigitalTwinSnapshot =
+        DigitalTwinSnapshot(
+            snapshotId = UUID.randomUUID().toString(),
+            exportedAt = exportedAt.toString(),
+            databaseVersion = DATABASE_VERSION,
+            headUnitInventory = latestHeadUnitInventory(),
+            vehicleProfile = latestVehicleProfile(),
+            healthAssessments = latestHealthAssessments(),
+        ).validate()
+
+    @Synchronized
+    fun exportDigitalTwin(exportedAt: Instant = Instant.now()): ByteArray =
+        gson.toJson(digitalTwinSnapshot(exportedAt)).toByteArray(Charsets.UTF_8)
 
     @Synchronized
     fun persistFrame(
@@ -405,6 +658,10 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "vhos-evidence.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
+        private val gson: Gson = GsonBuilder()
+            .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
+            .disableHtmlEscaping()
+            .create()
     }
 }

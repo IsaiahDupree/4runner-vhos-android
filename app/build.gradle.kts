@@ -10,8 +10,8 @@ android {
         applicationId = "dev.vhos.headunit"
         minSdk = 26
         targetSdk = 37
-        versionCode = 6
-        versionName = "0.1.0-dev.6"
+        versionCode = 7
+        versionName = "0.1.0-dev.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -38,6 +38,7 @@ android {
 
 dependencies {
     implementation(project(":core:discovery"))
+    implementation(project(":core:digitaltwin"))
     implementation(project(":core:model"))
     implementation(project(":core:protocol"))
     implementation(project(":core:release"))

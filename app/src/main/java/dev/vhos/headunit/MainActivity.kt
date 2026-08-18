@@ -2,6 +2,7 @@ package dev.vhos.headunit
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
@@ -9,13 +10,27 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import dev.vhos.digitaltwin.DigitalTwinSnapshot
+import dev.vhos.digitaltwin.Drivetrain
+import dev.vhos.digitaltwin.EngineConfiguration
+import dev.vhos.digitaltwin.HeadUnitInventory
+import dev.vhos.digitaltwin.HealthSummary
+import dev.vhos.digitaltwin.MileageSource
+import dev.vhos.digitaltwin.ModificationState
+import dev.vhos.digitaltwin.RearSuspension
+import dev.vhos.digitaltwin.TriState
+import dev.vhos.digitaltwin.VehicleProfile
 import dev.vhos.discovery.CanDiscoveryAnalyzer
 import dev.vhos.discovery.CanDiscoveryReport
 import dev.vhos.discovery.DiscoveryObservation
@@ -27,6 +42,7 @@ import dev.vhos.sync.BundleCreator
 import dev.vhos.sync.EvidenceBundles
 import java.time.Instant
 import java.util.Locale
+import java.util.UUID
 
 class MainActivity : Activity() {
     private lateinit var database: EvidenceDatabase
@@ -34,10 +50,14 @@ class MainActivity : Activity() {
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
     private lateinit var storageCard: TextView
+    private lateinit var inventoryCard: TextView
+    private lateinit var vehicleProfileCard: TextView
+    private lateinit var healthMapCard: TextView
     private lateinit var discoveryCard: TextView
     private lateinit var releaseCard: TextView
     private lateinit var releaseHub: ReleaseHubManager
     private var pendingExport: ByteArray? = null
+    private var pendingDigitalTwinExport: ByteArray? = null
     private val observer: (HeadUnitSnapshot) -> Unit = ::render
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,6 +69,8 @@ class MainActivity : Activity() {
         setContentView(buildContent())
         HeadUnitRuntime.observe(observer)
         refreshCounts()
+        captureHeadUnitInventory()
+        refreshDigitalTwin()
         refreshDiscovery()
         releaseHub.refresh()
     }
@@ -96,7 +118,31 @@ class MainActivity : Activity() {
             "Export" to ::prepareExport,
             "Import" to ::chooseImport,
         ))
+        controls.addView(controlRow(
+            "Vehicle profile" to ::editVehicleProfile,
+            "Refresh inventory" to ::captureHeadUnitInventory,
+            "Export digital twin" to ::prepareDigitalTwinExport,
+        ))
         root.addView(controls)
+
+        val twinColumns = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+        }
+        inventoryCard = card(16f)
+        vehicleProfileCard = card(16f)
+        twinColumns.addView(inventoryCard, weightedCardParams())
+        twinColumns.addView(vehicleProfileCard, weightedCardParams())
+        root.addView(twinColumns)
+
+        healthMapCard = card(15f).apply {
+            text = "WHOLE-VEHICLE HEALTH MAP  INITIALIZING\nNo system is healthy until qualifying evidence establishes it."
+            setTextColor(levelColor(IndicatorLevel.WAIT))
+        }
+        root.addView(healthMapCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
 
         val columns = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -211,7 +257,211 @@ class MainActivity : Activity() {
         when (requestCode) {
             EXPORT_REQUEST -> writeExport(uri)
             IMPORT_REQUEST -> readImport(uri)
+            DIGITAL_TWIN_EXPORT_REQUEST -> writeDigitalTwinExport(uri)
         }
+    }
+
+    private fun captureHeadUnitInventory() {
+        val inventory = try {
+            HeadUnitInventoryCollector.capture(this)
+        } catch (error: Exception) {
+            showError(error)
+            return
+        }
+        Thread {
+            try {
+                database.persistHeadUnitInventory(inventory)
+                refreshDigitalTwin()
+            } catch (error: Exception) {
+                showError(error)
+            }
+        }.start()
+    }
+
+    private fun refreshDigitalTwin() {
+        Thread {
+            try {
+                database.ensureInitialUnknownHealthMap()
+                val snapshot = database.digitalTwinSnapshot()
+                runOnUiThread { renderDigitalTwin(snapshot) }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (::healthMapCard.isInitialized) {
+                        healthMapCard.text = "WHOLE-VEHICLE HEALTH MAP  UNAVAILABLE\n${error.message ?: error.javaClass.simpleName}"
+                        healthMapCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun prepareDigitalTwinExport() {
+        Thread {
+            try {
+                database.ensureInitialUnknownHealthMap()
+                pendingDigitalTwinExport = database.exportDigitalTwin()
+                runOnUiThread {
+                    startActivityForResult(
+                        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "application/json"
+                            putExtra(
+                                Intent.EXTRA_TITLE,
+                                "vhos-digital-twin-${Instant.now().epochSecond}.json",
+                            )
+                        },
+                        DIGITAL_TWIN_EXPORT_REQUEST,
+                    )
+                }
+            } catch (error: Exception) {
+                showError(error)
+            }
+        }.start()
+    }
+
+    private fun writeDigitalTwinExport(uri: Uri) {
+        val bytes = pendingDigitalTwinExport ?: return
+        Thread {
+            try {
+                contentResolver.openOutputStream(uri, "w")?.use { it.write(bytes) }
+                    ?: throw IllegalStateException("Android did not provide a digital-twin export stream.")
+                pendingDigitalTwinExport = null
+                showToast(
+                    "Versioned digital twin exported • SHA-256 ${EvidenceBundles.sha256(bytes).take(12)}…"
+                )
+            } catch (error: Exception) {
+                showError(error)
+            }
+        }.start()
+    }
+
+    private fun editVehicleProfile() {
+        val current = try {
+            database.latestVehicleProfile()
+        } catch (error: Exception) {
+            showError(error)
+            return
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        fun field(label: String, value: String? = null, numeric: Boolean = false): EditText =
+            EditText(this).apply {
+                hint = label
+                setText(value.orEmpty())
+                inputType = if (numeric) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT
+                form.addView(this)
+            }
+        fun <T> selector(values: List<T>, labels: List<String>, selected: T?): Spinner =
+            Spinner(this).apply {
+                adapter = ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_spinner_dropdown_item,
+                    labels,
+                )
+                setSelection(values.indexOf(selected).coerceAtLeast(0))
+                form.addView(this)
+            }
+
+        val vin = field("VIN (17 characters)", current?.vin)
+        val mileage = field("Current odometer miles", current?.currentMileage?.toString(), numeric = true)
+        val trim = field("Trim", current?.trim)
+        val buildDate = field("Build date (YYYY-MM)", current?.buildDate)
+        val tires = field("Tire configuration", current?.tireConfiguration)
+        val modifications = field(
+            "Modifications (comma or line separated)",
+            current?.modifications?.joinToString(", "),
+        ).apply { minLines = 2 }
+        val engines = EngineConfiguration.entries
+        val engine = selector(engines, engines.map { it.displayName }, current?.engine)
+        val drivetrains = Drivetrain.entries
+        val drivetrain = selector(drivetrains, drivetrains.map { it.displayName }, current?.drivetrain)
+        val suspensions = RearSuspension.entries
+        val suspension = selector(suspensions, suspensions.map { it.displayName }, current?.rearSuspension)
+        val severeUseValues = TriState.entries
+        val severeUse = selector(
+            severeUseValues,
+            listOf("Severe use: unknown", "Severe use: yes", "Severe use: no"),
+            current?.severeUse,
+        )
+        val modificationStates = ModificationState.entries
+        val modificationState = selector(
+            modificationStates,
+            listOf("Modifications: unknown", "Modifications: stock", "Modifications: modified"),
+            current?.modificationState,
+        )
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("2005 Toyota 4Runner configuration")
+            .setMessage("Each save appends a permanent revision. Unknown values remain unknown.")
+            .setView(ScrollView(this).apply { addView(form) })
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save revision", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                try {
+                    val mileageValue = mileage.text.toString().trim().takeIf(String::isNotEmpty)?.toLong()
+                    val now = Instant.now().toString()
+                    val selectedEngine = engines[engine.selectedItemPosition]
+                    val profile = VehicleProfile(
+                        revisionId = UUID.randomUUID().toString(),
+                        supersedesRevisionId = current?.revisionId,
+                        createdAt = now,
+                        vin = vin.text.toString().trim().uppercase(Locale.US).takeIf(String::isNotEmpty),
+                        engine = selectedEngine,
+                        timingDrive = selectedEngine.timingDrive,
+                        drivetrain = drivetrains[drivetrain.selectedItemPosition],
+                        rearSuspension = suspensions[suspension.selectedItemPosition],
+                        trim = trim.text.toString().trim().takeIf(String::isNotEmpty),
+                        buildDate = buildDate.text.toString().trim().takeIf(String::isNotEmpty),
+                        tireConfiguration = tires.text.toString().trim().takeIf(String::isNotEmpty),
+                        severeUse = severeUseValues[severeUse.selectedItemPosition],
+                        modificationState = modificationStates[modificationState.selectedItemPosition],
+                        modifications = modifications.text.toString()
+                            .split(',', '\n')
+                            .map(String::trim)
+                            .filter(String::isNotEmpty)
+                            .distinct(),
+                        currentMileage = mileageValue,
+                        mileageObservedAt = mileageValue?.let { now },
+                        mileageSource = if (mileageValue == null) {
+                            MileageSource.UNKNOWN
+                        } else {
+                            MileageSource.MANUAL_ODOMETER
+                        },
+                    ).validate()
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
+                    Thread {
+                        try {
+                            database.appendVehicleProfile(profile)
+                            refreshDigitalTwin()
+                            runOnUiThread {
+                                dialog.dismiss()
+                                Toast.makeText(
+                                    this,
+                                    "Vehicle profile revision saved; all system health remains evidence-gated.",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        } catch (error: Exception) {
+                            runOnUiThread {
+                                dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                                Toast.makeText(
+                                    this,
+                                    error.message ?: error.javaClass.simpleName,
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        }
+                    }.start()
+                } catch (error: Exception) {
+                    showError(error)
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun writeExport(uri: Uri) {
@@ -364,11 +614,119 @@ class MainActivity : Activity() {
         storageCard.text = buildString {
             appendLine("LOCAL EVIDENCE  ${snapshot.storedLogicalFrames} FRAMES")
             appendLine("CAN observations: ${snapshot.storedCanObservations}")
-            appendLine("Database: append-only SQLite / WAL")
+            appendLine("Database: append-only SQLite / WAL • schema v2")
+            appendLine("Encryption at rest: NOT YET ENABLED • app sandbox only")
             appendLine("Export: SHA-256 manifest + NDJSON")
             append("Last import/export: ${if (snapshot.lastImportAtEpochMs != null || snapshot.lastExportAtEpochMs != null) "RECORDED" else "NONE"}")
         }
-        storageCard.setTextColor(levelColor(IndicatorLevel.PASS))
+        storageCard.setTextColor(levelColor(IndicatorLevel.CHECK))
+    }
+
+    private fun renderDigitalTwin(snapshot: DigitalTwinSnapshot) {
+        val inventory = snapshot.headUnitInventory
+        inventoryCard.text = if (inventory == null) {
+            "HEAD-UNIT INVENTORY  UNAVAILABLE\nNo platform inventory has been captured."
+        } else {
+            inventoryText(inventory)
+        }
+        inventoryCard.setTextColor(
+            levelColor(if (inventory == null) IndicatorLevel.WAIT else IndicatorLevel.PASS)
+        )
+
+        val profile = snapshot.vehicleProfile
+        vehicleProfileCard.text = profileText(profile)
+        vehicleProfileCard.setTextColor(
+            levelColor(
+                when {
+                    profile == null -> IndicatorLevel.WAIT
+                    profile.scheduleReady -> IndicatorLevel.PASS
+                    else -> IndicatorLevel.CHECK
+                }
+            )
+        )
+
+        val summary = HealthSummary.from(snapshot.healthAssessments)
+        healthMapCard.text = buildString {
+            appendLine(
+                "WHOLE-VEHICLE HEALTH MAP  ${summary.establishedSystems}/${summary.totalSystems} ESTABLISHED"
+            )
+            appendLine(
+                "Unknown ${summary.unknownSystems} • directly measured ${summary.byBasis[dev.vhos.digitaltwin.EvidenceBasis.DIRECT_MEASUREMENT]} • " +
+                    "calculated ${summary.byBasis[dev.vhos.digitaltwin.EvidenceBasis.CALCULATED]} • " +
+                    "schedule ${summary.byBasis[dev.vhos.digitaltwin.EvidenceBasis.SCHEDULE]} • " +
+                    "inspection ${summary.byBasis[dev.vhos.digitaltwin.EvidenceBasis.INSPECTION]} • " +
+                    "inferred ${summary.byBasis[dev.vhos.digitaltwin.EvidenceBasis.INFERRED]}"
+            )
+            appendLine("No DTCs is not treated as proof of health.")
+            snapshot.healthAssessments.forEach { assessment ->
+                appendLine(
+                    "${assessment.systemId.displayName}: ${assessment.state.name} • ${assessment.basis.name}"
+                )
+            }
+        }.trimEnd()
+        healthMapCard.setTextColor(
+            levelColor(if (summary.unknownSystems > 0) IndicatorLevel.WAIT else IndicatorLevel.CHECK)
+        )
+    }
+
+    private fun inventoryText(inventory: HeadUnitInventory): String = buildString {
+        appendLine("HEAD-UNIT INVENTORY  CAPTURED")
+        appendLine("${inventory.hardware.manufacturer} ${inventory.hardware.model}")
+        appendLine(
+            "Android ${inventory.android.release} / API ${inventory.android.apiLevel} • " +
+                "patch ${inventory.android.securityPatch.ifBlank { "unknown" }}"
+        )
+        appendLine(
+            "CPU ${inventory.hardware.cpuDescriptor ?: inventory.hardware.hardware} • " +
+                "${inventory.hardware.logicalCpuCount} logical • ${inventory.hardware.supportedAbis.joinToString()}"
+        )
+        appendLine(
+            "RAM ${formatBytes(inventory.hardware.totalRamBytes)} total / " +
+                "${formatBytes(inventory.hardware.availableRamBytes)} available"
+        )
+        appendLine(
+            "Storage ${formatBytes(inventory.hardware.freeInternalStorageBytes)} free / " +
+                "${formatBytes(inventory.hardware.totalInternalStorageBytes)}"
+        )
+        appendLine(
+            "Display ${inventory.display.widthPixels}×${inventory.display.heightPixels} • " +
+                "${inventory.display.densityDpi} dpi • ${inventory.display.widthDp}×${inventory.display.heightDp} dp"
+        )
+        appendLine(
+            "BLE ${if (inventory.capabilities.bleFeature) "PRESENT" else "MISSING"} • " +
+                "scan ${inventory.capabilities.bluetoothScanPermission} • " +
+                "connect ${inventory.capabilities.bluetoothConnectPermission}"
+        )
+        append(
+            "APK install ${inventory.capabilities.unknownSourceInstall} • " +
+                "battery exemption ${if (inventory.capabilities.batteryOptimizationExempt) "YES" else "NO"}"
+        )
+    }
+
+    private fun profileText(profile: VehicleProfile?): String = if (profile == null) {
+        "VEHICLE PROFILE  CONFIGURATION REQUIRED\n" +
+            "2005 Toyota 4Runner • VIN, engine, drivetrain, suspension, trim/build date, tires, use, modifications, and mileage remain unknown.\n" +
+            "No variant-specific service schedule is active."
+    } else buildString {
+        appendLine("VEHICLE PROFILE  ${if (profile.scheduleReady) "SCHEDULE READY" else "INCOMPLETE"}")
+        appendLine("2005 Toyota 4Runner • VIN ${profile.vin ?: "UNKNOWN"}")
+        appendLine("Vehicle pack ${profile.vehiclePackId} @ ${profile.vehiclePackVersion}")
+        appendLine("${profile.engine.displayName} • ${profile.timingDrive.displayName}")
+        appendLine("${profile.drivetrain.displayName} • ${profile.rearSuspension.displayName}")
+        appendLine("Trim ${profile.trim ?: "UNKNOWN"} • build ${profile.buildDate ?: "UNKNOWN"}")
+        appendLine("Tires ${profile.tireConfiguration ?: "UNKNOWN"} • severe use ${profile.severeUse}")
+        appendLine(
+            "Mileage ${profile.currentMileage?.let { String.format(Locale.US, "%,d mi", it) } ?: "UNKNOWN"}"
+        )
+        appendLine(
+            "Modifications ${profile.modificationState}: " +
+                profile.modifications.ifEmpty { listOf("NONE RECORDED") }.joinToString()
+        )
+        if (profile.scheduleReady) {
+            append("Variant guard active: ${profile.timingDrive.displayName} rules only.")
+        } else {
+            append("Still required: ${profile.scheduleReadinessIssues().joinToString()}.")
+        }
     }
 
     private fun deviceText(device: DeviceSnapshot): String = buildString {
@@ -510,6 +868,11 @@ class MainActivity : Activity() {
     private fun percent(value: Double): String = String.format(Locale.US, "%.2f%%", value * 100.0)
     private fun identifierHex(identifier: UInt): String =
         String.format(Locale.US, "0x%03X", identifier.toInt())
+    private fun formatBytes(bytes: Long): String {
+        val gib = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        return if (gib >= 1.0) String.format(Locale.US, "%.2f GiB", gib)
+        else String.format(Locale.US, "%.0f MiB", bytes.toDouble() / (1024.0 * 1024.0))
+    }
     private fun showToast(message: String) = runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     private fun showError(error: Exception) = showToast(error.message ?: error.javaClass.simpleName)
 
@@ -517,6 +880,7 @@ class MainActivity : Activity() {
         private const val PERMISSION_REQUEST = 1001
         private const val EXPORT_REQUEST = 1002
         private const val IMPORT_REQUEST = 1003
+        private const val DIGITAL_TWIN_EXPORT_REQUEST = 1004
         private const val DISCOVERY_RECORD_LIMIT = 100_000
     }
 }

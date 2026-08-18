@@ -20,6 +20,7 @@ include(
     ":app",
     ":core:model",
     ":core:discovery",
+    ":core:digitaltwin",
     ":core:protocol",
     ":core:release",
     ":core:sync",

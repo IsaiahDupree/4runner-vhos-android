@@ -2,10 +2,16 @@
 
 ## Save the hardware audit first
 
-Record the exact manufacturer/model, Android version and API level, build fingerprint, ABI, display
-resolution/density, free storage, BLE feature declaration, Bluetooth address behavior, power/sleep
-behavior, and distribution method in the vehicle record. `minSdk 26` is a build baseline, not proof
-that an unknown head unit is accepted.
+Open VHOS and use **Refresh inventory**. The app appends the exact manufacturer/model, Android
+version and API level, build fingerprint, ABI/CPU, RAM, display resolution/density, storage, BLE
+feature/permissions, installer authority, and battery-optimization status to the local vehicle
+record. Export the digital-twin JSON and retain it with commissioning evidence. Bluetooth address
+behavior and ignition/sleep recovery still require physical observation; `minSdk 26` is a build
+baseline, not proof that an unknown head unit is accepted.
+
+Use **Vehicle profile** to capture VIN, engine, drivetrain, rear suspension, trim/build date, tires,
+severe-use choice, modifications, and current mileage. Confirm the app identifies the V6 as timing
+chain or the V8 as timing belt before activating any variant-specific maintenance rules.
 
 ## First install using the iPhone
 

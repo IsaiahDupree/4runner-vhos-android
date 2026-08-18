@@ -47,6 +47,13 @@ The first vertical slice provides:
 - passive SAE J1979 Mode 01 response decoding, per-ECU supported-PID continuation tracking, and
   pinned standard read-only values that remain unavailable until support is proven;
 - real gateway, protocol, frame, error, and freshness indicators;
+- automatic head-unit hardware/runtime/deployment inventory;
+- an append-only `toyota.4runner.2005` configuration profile with a V6 timing-chain / V8
+  timing-belt applicability guard;
+- a 22-system whole-vehicle health map that begins entirely `UNKNOWN / UNKNOWN` and requires
+  immutable evidence before showing any health state;
+- a non-destructive SQLite schema-v2 migration and owner-controlled versioned digital-twin JSON
+  export;
 - direct reconnect to the last CRC-handshake-validated gateway before any scan;
 - bounded API 33 BLE scans with named platform errors, exponential cooldown, and owner retry;
 - recent evidence export and checksummed Android/iPhone handoff bundles;
@@ -106,3 +113,6 @@ The installed Android 13 recovery state machine is documented in
 [docs/API33-BLE-RECOVERY.md](docs/API33-BLE-RECOVERY.md).
 The evidence interpretation boundary and current 2,544-record baseline are documented in
 [docs/CAN-DISCOVERY-DASHBOARD.md](docs/CAN-DISCOVERY-DASHBOARD.md).
+The whole-vehicle model, evidence-basis rules, variant guard, and current implementation boundary
+are documented in
+[docs/WHOLE-VEHICLE-DIGITAL-TWIN.md](docs/WHOLE-VEHICLE-DIGITAL-TWIN.md).
