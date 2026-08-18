@@ -33,6 +33,11 @@ as a validated VHOS or OBD connection.
 7. After four bounded failures, automatic recovery pauses. The owner must tap **Connect / Reacquire**
    or use **Bluetooth settings** to cycle the head-unit radio.
 
+Seeing another advertisement is not recovery. The consecutive-failure counter resets only after a
+complete CRC-valid, identity-validated VHOS handshake, or after an explicit owner/radio restart.
+Repeated GATT, subscription, and handshake failures therefore advance through 5/15/30/60 seconds
+and open the circuit after the fourth automatic attempt instead of looping forever at attempt one.
+
 This replaces the original unbounded two-second scan loop. Scan error names, numeric codes, recovery
 attempts, and scheduled retry times remain visible in the OBD/CAN status card.
 
@@ -65,9 +70,11 @@ Run these while parked and preserve screenshots plus exported evidence:
    Android must wait while off, then resume through the bounded state machine.
 5. **Gateway power loss:** remove ESP32 power for 30 seconds and restore it. Android must reconnect
    without forgetting the saved identity.
-6. **Absent gateway:** leave the ESP32 off. Confirm four bounded attempts occur and recovery pauses;
+6. **Advertising but unusable gateway:** keep advertisements visible while forcing four successive
+   GATT/CCCD/handshake failures. Confirm the counter is not reset by rediscovery and recovery pauses.
+7. **Absent gateway:** leave the ESP32 off. Confirm four bounded attempts occur and recovery pauses;
    there must be no hot scan loop.
-7. **Vehicle evidence:** only after the VHOS handshake passes, verify listen-only health, increasing
+8. **Vehicle evidence:** only after the VHOS handshake passes, verify listen-only health, increasing
    CAN frame counts, zero bus-off events, and append-only persisted observations.
 
 The current A/C recovery image remains `FIRMWARE NOT READY`; this work does not invent A/C data or

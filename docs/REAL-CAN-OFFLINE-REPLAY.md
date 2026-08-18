@@ -1,6 +1,6 @@
 # Real CAN offline replay
 
-Status: implemented in Android source `0.1.0-dev.9`
+Status: implemented in Android source `0.1.0-dev.10`
 
 ## Purpose
 
@@ -69,6 +69,10 @@ Tests require:
 - bounded replay cancellation;
 - real-corpus discovery facts, checksum candidates, repeated channels, and raw relationships; and
 - complete Android unit tests, lint, and debug APK assembly.
+
+The separate [offline link reliability lab](LINK-RELIABILITY-LAB.md) extends these frame-level
+checks into a 15-condition matrix with MTU churn, bursts, duplicates, stale physical-link epochs,
+modeled supervision timeout, queue overrun, mixed interference, and a 40-cycle fixture soak.
 
 Run everything with:
 

@@ -132,12 +132,15 @@ class FrameStreamDecoder(
         private set
     var corruptCandidateCount: Long = 0
         private set
+    var maximumBufferedByteCount: Int = 0
+        private set
     val bufferedByteCount: Int
         @Synchronized get() = buffered.size
 
     @Synchronized
     fun append(chunk: ByteArray): List<GatewayFrame> {
         if (chunk.isNotEmpty()) buffered += chunk
+        maximumBufferedByteCount = maxOf(maximumBufferedByteCount, buffered.size)
         val frames = mutableListOf<GatewayFrame>()
         while (true) {
             if (!alignToMagic()) break
@@ -190,6 +193,7 @@ class FrameStreamDecoder(
         discardedByteCount = 0
         recoveryCount = 0
         corruptCandidateCount = 0
+        maximumBufferedByteCount = 0
     }
 
     @Synchronized

@@ -7,8 +7,9 @@
 Current public development build: **0.1.0-dev.6** (`app-debug.apk`, 2,697,891 bytes). The link above
 downloads the installer directly and does not require a GitHub account.
 
-Current source candidate: **0.1.0-dev.9**. It adds device-free real-CAN historical replay,
-sustained-load/fault recovery tests, and explicit transport-quality diagnostics. It is not the
+Current source candidate: **0.1.0-dev.10**. It adds a 15-scenario real-evidence link-reliability
+matrix, 20-cycle soak, stale-epoch/duplicate rejection, bounded-buffer diagnostics, richer raw CAN
+candidate display, and a recovery-counter fix for repeated Android GATT failures. It is not the
 public installer until its release artifact and catalog entry are signed and published.
 
 While the vehicle is parked:
@@ -52,6 +53,9 @@ The first vertical slice provides:
   through the production envelope/stream/CAN decoders at source time or full-speed ×20 load;
 - self-resynchronizing frame decoding with explicit corruption, discarded-byte, and recovery
   counters plus automated fragment-loss, payload-corruption, disconnect, cancellation, and soak tests;
+- an on-device **OFFLINE LINK RELIABILITY LAB • NOT LIVE** covering MTU 23/churn, bursts, stalls,
+  duplicates, fragment loss/corruption/reordering, stale link epochs, reconnects, modeled
+  supervision timeout, bounded queue overrun, and mixed interference against saved real evidence;
 - passive SAE J1979 Mode 01 response decoding, per-ECU supported-PID continuation tracking, and
   pinned standard read-only values that remain unavailable until support is proven;
 - real gateway, protocol, frame, error, and freshness indicators;
@@ -125,6 +129,9 @@ The evidence interpretation boundary and current 5,176-record baseline are docum
 [docs/CAN-DISCOVERY-DASHBOARD.md](docs/CAN-DISCOVERY-DASHBOARD.md).
 The device-free production-path replay controls, fault matrix, and hardware boundary are documented
 in [docs/REAL-CAN-OFFLINE-REPLAY.md](docs/REAL-CAN-OFFLINE-REPLAY.md).
+The harsher 15-scenario communication matrix, exact budgets, UI result semantics, recovery-loop
+fix, and remaining hardware-in-loop gate are documented in
+[docs/LINK-RELIABILITY-LAB.md](docs/LINK-RELIABILITY-LAB.md).
 The whole-vehicle model, evidence-basis rules, variant guard, and current implementation boundary
 are documented in
 [docs/WHOLE-VEHICLE-DIGITAL-TWIN.md](docs/WHOLE-VEHICLE-DIGITAL-TWIN.md).

@@ -39,6 +39,9 @@ import dev.vhos.discovery.HISTORICAL_REPLAY_SOURCE
 import dev.vhos.discovery.HistoricalCanReplay
 import dev.vhos.discovery.HistoricalReplayProgress
 import dev.vhos.discovery.HistoricalReplayReport
+import dev.vhos.discovery.LINK_RELIABILITY_LABEL
+import dev.vhos.discovery.LinkReliabilityLab
+import dev.vhos.discovery.LinkReliabilityMatrixReport
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
 import dev.vhos.model.IndicatorLevel
@@ -56,6 +59,8 @@ class MainActivity : Activity() {
     @Volatile private var activityDestroyed = false
     @Volatile private var replayGeneration = 0
     @Volatile private var replayRunning = false
+    @Volatile private var reliabilityGeneration = 0
+    @Volatile private var reliabilityRunning = false
     private lateinit var statusText: TextView
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
@@ -65,6 +70,7 @@ class MainActivity : Activity() {
     private lateinit var healthMapCard: TextView
     private lateinit var discoveryCard: TextView
     private lateinit var replayCard: TextView
+    private lateinit var reliabilityCard: TextView
     private lateinit var releaseCard: TextView
     private lateinit var releaseHub: ReleaseHubManager
     private var pendingExport: ByteArray? = null
@@ -86,6 +92,8 @@ class MainActivity : Activity() {
         activityDestroyed = true
         replayRunning = false
         replayGeneration++
+        reliabilityRunning = false
+        reliabilityGeneration++
         HeadUnitRuntime.removeObserver(observer)
         releaseHub.close()
         super.onDestroy()
@@ -217,6 +225,23 @@ class MainActivity : Activity() {
             "Replay saved CAN" to { startHistoricalReplay(repeat = 1, paced = true) },
             "Stress replay ×20" to { startHistoricalReplay(repeat = 20, paced = false) },
             "Stop replay" to ::stopHistoricalReplay,
+        ))
+
+        reliabilityCard = card(16f).apply {
+            text = buildString {
+                appendLine(LINK_RELIABILITY_LABEL)
+                appendLine("15 SCENARIOS • IDLE")
+                append("Runs soak, MTU churn, bursts, loss, corruption, reordering, duplicate, stale-epoch, timeout, reconnect, and overrun tests against saved real evidence.")
+            }
+            setTextColor(levelColor(IndicatorLevel.WAIT))
+        }
+        root.addView(reliabilityCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+        root.addView(controlRow(
+            "Run reliability matrix" to ::startLinkReliabilityLab,
+            "Stop link lab" to ::stopLinkReliabilityLab,
         ))
 
         releaseCard = card(16f)
@@ -635,14 +660,24 @@ class MainActivity : Activity() {
         appendLine()
         appendLine("INTEGRITY CANDIDATES")
         if (checksums.isEmpty()) appendLine("No additive-checksum family met the candidate gate.")
-        else appendLine(
-            "${checksums.size} IDs • ${checksums.sumOf { it.checksum.matches }}/" +
-                "${checksums.sumOf { it.checksum.checked }} candidate checksum matches"
-        )
+        else {
+            appendLine(
+                "${checksums.size} IDs • ${checksums.sumOf { it.checksum.matches }}/" +
+                    "${checksums.sumOf { it.checksum.checked }} candidate checksum matches"
+            )
+            checksums.take(8).forEach { item ->
+                appendLine(
+                    "${item.identifierHex} raw additive candidate • " +
+                        "${item.checksum.matches}/${item.checksum.checked} " +
+                        "(${percent(item.checksum.matchRate)}) • MEANING UNVERIFIED"
+                )
+            }
+        }
         report.repeatedChannels.take(2).forEach { item ->
             appendLine(
                 "${identifierHex(item.identifier)} bytes ${item.bytePositions.joinToString()} agree across " +
-                    "${item.recordsCompared} retained records (candidate only)"
+                    "${item.recordsCompared} retained records • raw range ${item.minimum}–${item.maximum} " +
+                    "• max disagreement ${item.maximumDisagreement} • MEANING UNVERIFIED"
             )
         }
         if (report.rawWordRelationships.isNotEmpty()) {
@@ -652,7 +687,11 @@ class MainActivity : Activity() {
                 appendLine(
                     "${identifierHex(relation.leftIdentifier)}↔${identifierHex(relation.rightIdentifier)} " +
                         "BE16 correlation ${decimal(relation.pearsonCorrelation, 3)} • " +
-                        "${relation.pairedSamples} paired samples"
+                        "${relation.pairedSamples} paired samples" +
+                        relation.medianRightToLeftRatio?.let {
+                            " • median raw ratio ${decimal(it, 3)}"
+                        }.orEmpty() +
+                        " • MEANING UNVERIFIED"
                 )
             }
         }
@@ -813,6 +852,118 @@ class MainActivity : Activity() {
                         else -> IndicatorLevel.BLOCKED
                     }
                 )
+            )
+        }
+    }
+
+    private fun startLinkReliabilityLab() {
+        val store = evidenceStoreOrNotify() ?: return
+        val generation = synchronized(this) {
+            reliabilityGeneration++
+            reliabilityRunning = true
+            reliabilityGeneration
+        }
+        reliabilityCard.text = buildString {
+            appendLine(LINK_RELIABILITY_LABEL)
+            appendLine("REAL_CAPTURE_REPLAY • RUNNING")
+            append("Reading immutable CAN observations and executing the deterministic 15-scenario matrix…")
+        }
+        reliabilityCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
+        Thread {
+            try {
+                val persisted = store.recentCanObservations(RELIABILITY_RECORD_LIMIT)
+                if (persisted.isEmpty()) {
+                    throw IllegalStateException(
+                        "No persisted CAN observations are available. Import verified iPhone evidence first."
+                    )
+                }
+                val report = LinkReliabilityLab.run(
+                    input = persisted.map { DiscoveryObservation(it.sourceId, it.observation) },
+                    soakCycles = RELIABILITY_SOAK_CYCLES,
+                    shouldContinue = {
+                        !activityDestroyed && reliabilityRunning &&
+                            reliabilityGeneration == generation
+                    },
+                )
+                synchronized(this) {
+                    if (reliabilityGeneration == generation) reliabilityRunning = false
+                }
+                renderReliabilityResult(generation, report)
+            } catch (error: Exception) {
+                val stopped = activityDestroyed || !reliabilityRunning ||
+                    reliabilityGeneration != generation
+                synchronized(this) {
+                    if (reliabilityGeneration == generation) reliabilityRunning = false
+                }
+                if (!activityDestroyed && reliabilityGeneration == generation) runOnUiThread {
+                    reliabilityCard.text = buildString {
+                        appendLine(LINK_RELIABILITY_LABEL)
+                        appendLine(if (stopped) "STOPPED" else "BLOCKED")
+                        append(
+                            if (stopped) {
+                                "The operator stopped the offline lab; stored evidence and live BLE were unchanged."
+                            } else {
+                                error.message ?: error.javaClass.simpleName
+                            }
+                        )
+                    }
+                    reliabilityCard.setTextColor(
+                        levelColor(if (stopped) IndicatorLevel.WAIT else IndicatorLevel.BLOCKED)
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun stopLinkReliabilityLab() {
+        synchronized(this) {
+            reliabilityRunning = false
+            reliabilityGeneration++
+        }
+        reliabilityCard.text = buildString {
+            appendLine(LINK_RELIABILITY_LABEL)
+            appendLine("STOPPED")
+            append("Stored evidence and the live gateway session were not modified.")
+        }
+        reliabilityCard.setTextColor(levelColor(IndicatorLevel.WAIT))
+    }
+
+    private fun renderReliabilityResult(
+        generation: Int,
+        report: LinkReliabilityMatrixReport,
+    ) {
+        if (activityDestroyed || reliabilityGeneration != generation) return
+        runOnUiThread {
+            if (activityDestroyed || reliabilityGeneration != generation) return@runOnUiThread
+            val maximumBuffer = report.scenarios.maxOf { it.decoderMaximumBufferedBytes }
+            reliabilityCard.text = buildString {
+                appendLine(report.label)
+                appendLine(
+                    "SOURCE ${report.sourceClassification} • " +
+                        if (report.passed) "MATRIX PASS" else "MATRIX FAIL"
+                )
+                appendLine(
+                    "${report.scenarios.count { it.passed }}/${report.scenarios.size} scenarios • " +
+                        "${report.totalWireDeliveries} wire deliveries • " +
+                        "${report.soakCycles}× clean soak"
+                )
+                appendLine(
+                    "Expected healthy ${report.healthyScenarios} • correctly degraded " +
+                        "${report.degradedScenarios} • max decoder buffer $maximumBuffer bytes"
+                )
+                report.scenarios.forEach { scenario ->
+                    appendLine(
+                        "${scenario.scenario.name.replace('_', '-')}  " +
+                            "${if (scenario.passed) "PASS" else "FAIL"}/${scenario.observedQuality} • " +
+                            "accepted ${scenario.acceptedUniqueRecords}/${scenario.expectedUniqueRecords} • " +
+                            "loss ${scenario.inducedLostWireFrames} dup ${scenario.duplicateIdentityRejections} " +
+                            "stale ${scenario.staleEpochNotificationRejections} reconnect ${scenario.reconnects}"
+                    )
+                }
+                append("LAB BOUNDARY • Actual RF coexistence, controller buffers, Android lifecycle, ESP32 resets, and vehicle-bus load still require hardware-in-loop.")
+            }
+            reliabilityCard.setTextColor(
+                levelColor(if (report.passed) IndicatorLevel.PASS else IndicatorLevel.BLOCKED)
             )
         }
     }
@@ -1138,5 +1289,7 @@ class MainActivity : Activity() {
         private const val DISCOVERY_RECORD_LIMIT = 100_000
         private const val REPLAY_RECORD_LIMIT = 100_000
         private const val REPLAY_SPEED_MULTIPLIER = 25.0
+        private const val RELIABILITY_RECORD_LIMIT = 100_000
+        private const val RELIABILITY_SOAK_CYCLES = 20
     }
 }

@@ -284,7 +284,6 @@ class DualGatewayManager(
         if (!running || released || !scanning || candidates.containsKey(result.device.address)) return
         if (candidates.size >= MAX_CONCURRENT_CANDIDATES) return
         stopScan()
-        recoveryFailures = 0
         emitObd(
             ConnectionPhase.DISCOVERED,
             IndicatorLevel.ACTIVE,

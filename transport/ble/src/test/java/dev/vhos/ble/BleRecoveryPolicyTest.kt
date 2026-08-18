@@ -42,4 +42,16 @@ class BleRecoveryPolicyTest {
         assertFalse(BleRecoveryPolicy.afterNoResult(5).automatic)
         assertTrue(BleRecoveryPolicy.SCAN_WINDOW_MILLIS >= 10_000L)
     }
+
+    @Test
+    fun repeatedConnectionLossesEscalateAndThenOpenTheCircuit() {
+        assertEquals(5_000L, BleRecoveryPolicy.afterConnectionLoss(1).delayMillis)
+        assertEquals(15_000L, BleRecoveryPolicy.afterConnectionLoss(2).delayMillis)
+        assertEquals(30_000L, BleRecoveryPolicy.afterConnectionLoss(3).delayMillis)
+        assertEquals(60_000L, BleRecoveryPolicy.afterConnectionLoss(4).delayMillis)
+
+        val exhausted = BleRecoveryPolicy.afterConnectionLoss(5)
+        assertFalse(exhausted.automatic)
+        assertEquals(0L, exhausted.delayMillis)
+    }
 }

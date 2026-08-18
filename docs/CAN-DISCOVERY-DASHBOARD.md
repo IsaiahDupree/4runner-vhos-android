@@ -1,6 +1,6 @@
 # CAN Discovery dashboard
 
-Status: discovery plus real historical replay implemented in Android `0.1.0-dev.9`
+Status: discovery, richer raw-candidate rendering, and real historical replay implemented in Android `0.1.0-dev.10`
 
 ## Purpose
 
