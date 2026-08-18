@@ -1,6 +1,6 @@
 # CAN Discovery dashboard
 
-Status: implemented in Android `0.1.0-dev.6`
+Status: discovery plus real historical replay implemented in Android `0.1.0-dev.9`
 
 ## Purpose
 
@@ -99,32 +99,49 @@ applicability, independent reference evidence, versioned decoder, and golden rep
 
 ## Current saved-capture baseline
 
-The companion engineering CLI replayed the five saved iPhone sessions available on 2026-08-18:
+The companion engineering CLI replayed the eight saved iPhone sessions preserved on 2026-08-18:
 
 | Metric | Result |
 | --- | ---: |
-| Retained observations | 2,544 |
-| Sessions | 5 |
+| Retained observations | 5,176 |
+| Sessions | 8 |
 | Unique identifiers | 17 |
 | Bitrate | 500 kbit/s |
-| Standard identifiers | 2,544/2,544 |
-| Listen-only proof | 2,544/2,544 |
+| Standard identifiers | 5,176/5,176 |
+| Listen-only proof | 5,176/5,176 |
 | Remote requests | 0 |
-| Total sampled duration | 68.986 s |
-| Estimated observed traffic | 542.342 frames/s |
-| Retained rate | 36.877 records/s |
-| Sampled sequence coverage | 6.799% |
+| Total sampled duration | 140.831 s |
+| Estimated observed traffic | 538.880 frames/s |
+| Retained rate | 36.753 records/s |
+| Sampled sequence coverage | 6.8196% |
 
 Current candidate-only findings include:
 
-- 2,048/2,048 additive-checksum matches across eight candidate ID families;
-- `0x025` bytes 4/5/6 agreeing across 327 retained records; and
-- raw `0x2C4 BE16[0]` / `0x2D0 BE16[0]` correlation 0.964242 across 323 bounded pairs.
+- 4,181/4,181 additive-checksum matches across eight candidate ID families;
+- `0x025` bytes 4/5/6 agreeing across 667 retained records;
+- raw `0x2C4 BE16[0]` / `0x2D0 BE16[0]` correlation 0.992130 across 625 bounded pairs; and
+- raw `0x022 BE16[0]` / `0x223 BE16[0]` correlation -0.999643 across 142 bounded pairs.
 
 Those numbers are useful for choosing the next experiment. They are not production decoders.
 
 The authoritative machine-readable engineering report and source-file SHA-256 values live in the
 [product repository](https://github.com/IsaiahDupree/4runner-vehicle-health-os/blob/agent/ios-hardware-foundation/docs/evidence/can-discovery-2026-08-18.report.json).
+
+The superseding 5,176-record report is
+[`can-discovery-2026-08-18-5176.report.json`](https://github.com/IsaiahDupree/4runner-vehicle-health-os/blob/agent/ios-hardware-foundation/docs/evidence/can-discovery-2026-08-18-5176.report.json).
+
+## Historical replay workflow
+
+The dashboard can feed saved observations back through the production framing and decoding path:
+
+- **Replay saved CAN** uses accelerated source timing;
+- **Stress replay ×20** exercises sustained full-speed decode and UI progress;
+- **Stop replay** cancels without writing derived evidence; and
+- the card always says **HISTORICAL REPLAY • NOT LIVE** and **REAL_CAPTURE_REPLAY**.
+
+Session, source sequence, identifier, raw bytes, original source time, decoder recoveries, and
+discarded bytes stay visible. Replay cannot alter the digital twin or turn a candidate into a
+vehicle signal. See [Real CAN offline replay](REAL-CAN-OFFLINE-REPLAY.md).
 
 ## Head-unit workflow
 
@@ -152,11 +169,15 @@ The pure Kotlin analyzer is covered by golden records that exercise:
 - repeated dynamic byte channels; and
 - rejection of any record lacking listen-only proof.
 
+The replay suites additionally cover a checksum-pinned real fixture, twenty repeated passes,
+hostile fragmentation, dropped notification fragments, corrupt payloads, mid-frame disconnects,
+exact subsequent-frame recovery, and bounded cancellation.
+
 Full Android acceptance remains:
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export ANDROID_SDK_ROOT=/Users/isaiahdupree/Library/Android/sdk
+export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
 ./gradlew test lint assembleDebug
 ```
 

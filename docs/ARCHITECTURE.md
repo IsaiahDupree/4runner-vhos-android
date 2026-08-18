@@ -78,6 +78,14 @@ does not persist a vehicle-signal meaning. The head-unit UI labels the complete 
 `CANDIDATES ONLY`; RPM, speed, gear, steering, brake, temperature, pressure, thresholds, and health
 conclusions remain unavailable until the shared Vehicle Signal Pack promotion process succeeds.
 
+The same module owns device-free historical replay. It deterministically rebuilds the deployed
+CAN payload and CRC32C VHOS envelope from persisted observations, applies source-time or full-speed
+fragment scheduling, and sends the bytes through the production stream and CAN decoders. Exact
+source identity, order, and payload are the oracle. Fault profiles remove a notification fragment,
+corrupt a payload, or reset the decoder mid-frame; later valid observations must recover with
+explicit transport diagnostics. Replay is read-only and must display
+`HISTORICAL REPLAY • NOT LIVE`; it cannot update the vehicle model.
+
 Neither app silently takes over BLE from the other. The head unit exposes **Release for iPhone**,
 which closes GATT cleanly and records the release. Android can re-acquire only after explicit owner
 action or a configured vehicle-session policy.

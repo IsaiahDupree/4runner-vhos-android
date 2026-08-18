@@ -34,6 +34,11 @@ import dev.vhos.digitaltwin.VehicleProfile
 import dev.vhos.discovery.CanDiscoveryAnalyzer
 import dev.vhos.discovery.CanDiscoveryReport
 import dev.vhos.discovery.DiscoveryObservation
+import dev.vhos.discovery.HISTORICAL_REPLAY_LABEL
+import dev.vhos.discovery.HISTORICAL_REPLAY_SOURCE
+import dev.vhos.discovery.HistoricalCanReplay
+import dev.vhos.discovery.HistoricalReplayProgress
+import dev.vhos.discovery.HistoricalReplayReport
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
 import dev.vhos.model.IndicatorLevel
@@ -43,11 +48,14 @@ import dev.vhos.sync.EvidenceBundles
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.locks.LockSupport
 
 class MainActivity : Activity() {
     @Volatile private var database: EvidenceDatabase? = null
     @Volatile private var storeInitializationError: String? = null
     @Volatile private var activityDestroyed = false
+    @Volatile private var replayGeneration = 0
+    @Volatile private var replayRunning = false
     private lateinit var statusText: TextView
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
@@ -56,6 +64,7 @@ class MainActivity : Activity() {
     private lateinit var vehicleProfileCard: TextView
     private lateinit var healthMapCard: TextView
     private lateinit var discoveryCard: TextView
+    private lateinit var replayCard: TextView
     private lateinit var releaseCard: TextView
     private lateinit var releaseHub: ReleaseHubManager
     private var pendingExport: ByteArray? = null
@@ -75,6 +84,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         activityDestroyed = true
+        replayRunning = false
+        replayGeneration++
         HeadUnitRuntime.removeObserver(observer)
         releaseHub.close()
         super.onDestroy()
@@ -188,6 +199,24 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(14) })
         root.addView(controlRow(
             "Analyze saved CAN" to ::refreshDiscovery,
+        ))
+
+        replayCard = card(16f).apply {
+            text = buildString {
+                appendLine(HISTORICAL_REPLAY_LABEL)
+                appendLine("SOURCE $HISTORICAL_REPLAY_SOURCE • IDLE")
+                append("Saved evidence can be replayed through the production wire decoder without connecting to a vehicle.")
+            }
+            setTextColor(levelColor(IndicatorLevel.WAIT))
+        }
+        root.addView(replayCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+        root.addView(controlRow(
+            "Replay saved CAN" to { startHistoricalReplay(repeat = 1, paced = true) },
+            "Stress replay ×20" to { startHistoricalReplay(repeat = 20, paced = false) },
+            "Stop replay" to ::stopHistoricalReplay,
         ))
 
         releaseCard = card(16f)
@@ -631,6 +660,163 @@ class MainActivity : Activity() {
         append("INTERPRETATION LOCK • RPM, speed, gear, throttle, steering, brake, and health thresholds remain unavailable until an independent reference capture validates exact bytes, scaling, applicability, and lineage.")
     }
 
+    private fun startHistoricalReplay(repeat: Int, paced: Boolean) {
+        val store = evidenceStoreOrNotify() ?: return
+        val generation = synchronized(this) {
+            replayGeneration++
+            replayRunning = true
+            replayGeneration
+        }
+        replayCard.text = buildString {
+            appendLine(HISTORICAL_REPLAY_LABEL)
+            appendLine("SOURCE $HISTORICAL_REPLAY_SOURCE • PREPARING")
+            append("Reading immutable observations from the encrypted local evidence store…")
+        }
+        replayCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
+        Thread {
+            try {
+                val persisted = store.recentCanObservations(REPLAY_RECORD_LIMIT)
+                if (persisted.isEmpty()) {
+                    throw IllegalStateException(
+                        "No persisted CAN observations are available. Import verified iPhone evidence first."
+                    )
+                }
+                var priorCaptureOffset = 0UL
+                val report = HistoricalCanReplay.run(
+                    input = persisted.map { DiscoveryObservation(it.sourceId, it.observation) },
+                    repeat = repeat,
+                    shouldContinue = {
+                        !activityDestroyed && replayRunning && replayGeneration == generation
+                    },
+                    onRecord = { progress ->
+                        if (paced) {
+                            val delta = progress.sourceCaptureOffsetMicroseconds
+                                .takeIf { it >= priorCaptureOffset }
+                                ?.minus(priorCaptureOffset)
+                                ?: 0UL
+                            val pauseNanoseconds = minOf(
+                                100_000_000L,
+                                (delta.toDouble() * 1_000.0 / REPLAY_SPEED_MULTIPLIER).toLong(),
+                            )
+                            if (pauseNanoseconds > 0) LockSupport.parkNanos(pauseNanoseconds)
+                            priorCaptureOffset = progress.sourceCaptureOffsetMicroseconds
+                        }
+                        if (progress.recordIndex == 1 || progress.recordIndex % 64 == 0 ||
+                            progress.recordIndex == progress.totalExpectedRecords
+                        ) {
+                            renderReplayProgress(generation, progress, repeat, paced)
+                        }
+                    },
+                )
+                synchronized(this) {
+                    if (replayGeneration == generation) replayRunning = false
+                }
+                renderReplayResult(generation, report)
+            } catch (error: Exception) {
+                synchronized(this) {
+                    if (replayGeneration == generation) replayRunning = false
+                }
+                if (!activityDestroyed && replayGeneration == generation) runOnUiThread {
+                    replayCard.text = buildString {
+                        appendLine(HISTORICAL_REPLAY_LABEL)
+                        appendLine("SOURCE $HISTORICAL_REPLAY_SOURCE • BLOCKED")
+                        append(error.message ?: error.javaClass.simpleName)
+                    }
+                    replayCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
+                }
+            }
+        }.start()
+    }
+
+    private fun stopHistoricalReplay() {
+        synchronized(this) {
+            replayRunning = false
+            replayGeneration++
+        }
+        replayCard.text = buildString {
+            appendLine(HISTORICAL_REPLAY_LABEL)
+            appendLine("SOURCE $HISTORICAL_REPLAY_SOURCE • STOPPED")
+            append("Replay stopped by the operator. Stored evidence and the live BLE session were not changed.")
+        }
+        replayCard.setTextColor(levelColor(IndicatorLevel.WAIT))
+    }
+
+    private fun renderReplayProgress(
+        generation: Int,
+        progress: HistoricalReplayProgress,
+        repeat: Int,
+        paced: Boolean,
+    ) {
+        if (activityDestroyed || replayGeneration != generation) return
+        runOnUiThread {
+            if (activityDestroyed || replayGeneration != generation) return@runOnUiThread
+            val record = progress.record
+            replayCard.text = buildString {
+                appendLine(HISTORICAL_REPLAY_LABEL)
+                appendLine(
+                    "SOURCE $HISTORICAL_REPLAY_SOURCE • " +
+                        if (paced) "${decimal(REPLAY_SPEED_MULTIPLIER)}× SOURCE TIME" else "MAX-SPEED LOAD ×$repeat"
+                )
+                appendLine(
+                    "${progress.recordIndex}/${progress.totalExpectedRecords} decoded • " +
+                        "session ${record.sessionId} • source sequence ${record.sourceSequence}"
+                )
+                appendLine(
+                    "RAW ${identifierHex(record.identifier)} • ${record.bitrateBps / 1_000} kbit/s • " +
+                        record.data.take(record.dataLength).joinToString(" ") {
+                            String.format(Locale.US, "%02X", it.toInt() and 0xFF)
+                        }
+                )
+                appendLine(
+                    "Source timeline ${decimal(progress.sourceCaptureOffsetMicroseconds.toDouble() / 1_000_000.0)} s • " +
+                        "recoveries ${progress.decoderRecoveries} • discarded ${progress.decoderDiscardedBytes} bytes"
+                )
+                append("Interpretation locked: this is recorded raw evidence, not current vehicle state.")
+            }
+            replayCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
+        }
+    }
+
+    private fun renderReplayResult(generation: Int, report: HistoricalReplayReport) {
+        if (activityDestroyed || replayGeneration != generation) return
+        runOnUiThread {
+            if (activityDestroyed || replayGeneration != generation) return@runOnUiThread
+            replayCard.text = buildString {
+                appendLine(report.label)
+                appendLine(
+                    "SOURCE ${report.sourceClassification} • " +
+                        when {
+                            report.cancelled -> "CANCELLED"
+                            report.passed -> "TRANSPORT PASS"
+                            else -> "TRANSPORT FAIL"
+                        }
+                )
+                appendLine(
+                    "${report.decodedRecords}/${report.expectedRecordsAfterFaults} exact records • " +
+                        "${report.sessions} sessions • ${report.uniqueIdentifiers} identifiers • repeat ${report.repeat}×"
+                )
+                appendLine(
+                    "Source duration ${decimal(report.sourceDurationMicroseconds.toDouble() / 1_000_000.0)} s • " +
+                        "recoveries ${report.decoderRecoveries} • corrupt ${report.decoderCorruptCandidates} • " +
+                        "discarded ${report.decoderDiscardedBytes} bytes"
+                )
+                appendLine(
+                    "Order + payload identity ${if (report.exactRecordOrderAndPayloadMatch) "VERIFIED" else "FAILED"}"
+                )
+                append("No replayed identifier or byte field is promoted to a vehicle meaning or health conclusion.")
+            }
+            replayCard.setTextColor(
+                levelColor(
+                    when {
+                        report.cancelled -> IndicatorLevel.WAIT
+                        report.passed -> IndicatorLevel.PASS
+                        else -> IndicatorLevel.BLOCKED
+                    }
+                )
+            )
+        }
+    }
+
     private fun render(snapshot: HeadUnitSnapshot) {
         statusText.text = getString(
             R.string.system_status_format,
@@ -950,5 +1136,7 @@ class MainActivity : Activity() {
         private const val IMPORT_REQUEST = 1003
         private const val DIGITAL_TWIN_EXPORT_REQUEST = 1004
         private const val DISCOVERY_RECORD_LIMIT = 100_000
+        private const val REPLAY_RECORD_LIMIT = 100_000
+        private const val REPLAY_SPEED_MULTIPLIER = 25.0
     }
 }

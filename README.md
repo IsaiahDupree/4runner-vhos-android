@@ -7,6 +7,10 @@
 Current public development build: **0.1.0-dev.6** (`app-debug.apk`, 2,697,891 bytes). The link above
 downloads the installer directly and does not require a GitHub account.
 
+Current source candidate: **0.1.0-dev.9**. It adds device-free real-CAN historical replay,
+sustained-load/fault recovery tests, and explicit transport-quality diagnostics. It is not the
+public installer until its release artifact and catalog entry are signed and published.
+
 While the vehicle is parked:
 
 1. Tap **DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)** above.
@@ -44,6 +48,10 @@ The first vertical slice provides:
   transactional materialization of CRC-valid persistent capture records;
 - a versioned CAN Discovery dashboard for acquisition facts, sampled coverage, raw activity,
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
+- a read-only **HISTORICAL REPLAY • NOT LIVE** surface that replays persisted real CAN evidence
+  through the production envelope/stream/CAN decoders at source time or full-speed ×20 load;
+- self-resynchronizing frame decoding with explicit corruption, discarded-byte, and recovery
+  counters plus automated fragment-loss, payload-corruption, disconnect, cancellation, and soak tests;
 - passive SAE J1979 Mode 01 response decoding, per-ECU supported-PID continuation tracking, and
   pinned standard read-only values that remain unavailable until support is proven;
 - real gateway, protocol, frame, error, and freshness indicators;
@@ -99,7 +107,7 @@ in the product repository's
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export ANDROID_SDK_ROOT=/Users/isaiahdupree/Library/Android/sdk
+export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
 ./gradlew test lint assembleDebug
 ```
 
@@ -113,8 +121,10 @@ services the app accepts. The one-trip vehicle test is in
 [docs/HEAD-UNIT-COMMISSIONING.md](docs/HEAD-UNIT-COMMISSIONING.md).
 The installed Android 13 recovery state machine is documented in
 [docs/API33-BLE-RECOVERY.md](docs/API33-BLE-RECOVERY.md).
-The evidence interpretation boundary and current 2,544-record baseline are documented in
+The evidence interpretation boundary and current 5,176-record baseline are documented in
 [docs/CAN-DISCOVERY-DASHBOARD.md](docs/CAN-DISCOVERY-DASHBOARD.md).
+The device-free production-path replay controls, fault matrix, and hardware boundary are documented
+in [docs/REAL-CAN-OFFLINE-REPLAY.md](docs/REAL-CAN-OFFLINE-REPLAY.md).
 The whole-vehicle model, evidence-basis rules, variant guard, and current implementation boundary
 are documented in
 [docs/WHOLE-VEHICLE-DIGITAL-TWIN.md](docs/WHOLE-VEHICLE-DIGITAL-TWIN.md).

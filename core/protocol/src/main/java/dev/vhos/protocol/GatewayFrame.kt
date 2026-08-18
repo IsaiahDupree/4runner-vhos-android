@@ -126,26 +126,60 @@ class FrameStreamDecoder(
     private val maximumPayloadBytes: Int = GatewayFrame.DEFAULT_MAXIMUM_PAYLOAD_BYTES,
 ) {
     private var buffered = ByteArray(0)
+    var discardedByteCount: Long = 0
+        private set
+    var recoveryCount: Long = 0
+        private set
+    var corruptCandidateCount: Long = 0
+        private set
+    val bufferedByteCount: Int
+        @Synchronized get() = buffered.size
 
     @Synchronized
     fun append(chunk: ByteArray): List<GatewayFrame> {
         if (chunk.isNotEmpty()) buffered += chunk
         val frames = mutableListOf<GatewayFrame>()
-        while (buffered.size >= GatewayFrame.HEADER_LENGTH) {
-            if (!buffered.copyOfRange(0, 4).contentEquals(GatewayFrame.MAGIC)) {
-                buffered = ByteArray(0)
-                throw FrameException.InvalidMagic
-            }
+        while (true) {
+            if (!alignToMagic()) break
+            if (buffered.size < GatewayFrame.HEADER_LENGTH) break
+
             val payloadLength = buffered.u32(8).toLong()
-            if (payloadLength > maximumPayloadBytes) {
-                buffered = ByteArray(0)
-                throw FrameException.PayloadTooLarge(payloadLength.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            if (!headerIsValid(0, payloadLength)) {
+                corruptCandidateCount++
+                discardPrefix(1)
+                continue
             }
             val frameLength = GatewayFrame.HEADER_LENGTH + payloadLength.toInt()
-            if (buffered.size < frameLength) break
+            if (buffered.size < frameLength) {
+                val nextHeader = nextValidHeaderOffset(GatewayFrame.MAGIC.size)
+                if (nextHeader != null) {
+                    corruptCandidateCount++
+                    discardPrefix(nextHeader)
+                    continue
+                }
+                val nextMagic = findMagic(GatewayFrame.MAGIC.size)
+                if (nextMagic >= 0) {
+                    corruptCandidateCount++
+                    discardPrefix(nextMagic)
+                }
+                break
+            }
             val frameBytes = buffered.copyOfRange(0, frameLength)
-            frames += GatewayFrame.decode(frameBytes, maximumPayloadBytes)
-            buffered = buffered.copyOfRange(frameLength, buffered.size)
+            try {
+                frames += GatewayFrame.decode(frameBytes, maximumPayloadBytes)
+                buffered = buffered.copyOfRange(frameLength, buffered.size)
+            } catch (_: FrameException) {
+                corruptCandidateCount++
+                val nextHeader = nextValidHeaderOffset(1)
+                if (nextHeader != null) {
+                    discardPrefix(nextHeader)
+                } else {
+                    val nextMagic = findMagic(1)
+                    if (nextMagic >= 0) discardPrefix(nextMagic)
+                    else discardUnframedBytesPreservingMagicPrefix()
+                    break
+                }
+            }
         }
         return frames
     }
@@ -153,5 +187,88 @@ class FrameStreamDecoder(
     @Synchronized
     fun reset() {
         buffered = ByteArray(0)
+        discardedByteCount = 0
+        recoveryCount = 0
+        corruptCandidateCount = 0
+    }
+
+    @Synchronized
+    fun resetBufferPreservingDiagnostics() {
+        if (buffered.isNotEmpty()) {
+            discardedByteCount += buffered.size
+            recoveryCount++
+            buffered = ByteArray(0)
+        }
+    }
+
+    private fun alignToMagic(): Boolean {
+        if (buffered.isEmpty()) return false
+        if (startsWithMagic(0)) return true
+        val next = findMagic(1)
+        if (next >= 0) {
+            discardPrefix(next)
+            return true
+        }
+        discardUnframedBytesPreservingMagicPrefix()
+        return false
+    }
+
+    private fun headerIsValid(offset: Int, payloadLength: Long? = null): Boolean {
+        if (offset < 0 || buffered.size - offset < GatewayFrame.HEADER_LENGTH) return false
+        if (!startsWithMagic(offset)) return false
+        if (buffered[offset + 4].toUByte().toInt() != 1) return false
+        if (MessageType.entries.none { it.code == buffered[offset + 6].toUByte().toInt() }) return false
+        val length = payloadLength ?: buffered.u32(offset + 8).toLong()
+        if (length > maximumPayloadBytes) return false
+        val expected = buffered.u32(offset + 32)
+        val actual = Crc32c.checksum(buffered, offset, 32)
+        return expected == actual
+    }
+
+    private fun nextValidHeaderOffset(start: Int): Int? {
+        var candidate = findMagic(start)
+        while (candidate >= 0) {
+            if (buffered.size - candidate < GatewayFrame.HEADER_LENGTH) return null
+            if (headerIsValid(candidate)) return candidate
+            candidate = findMagic(candidate + 1)
+        }
+        return null
+    }
+
+    private fun findMagic(start: Int): Int {
+        if (start < 0 || buffered.size < GatewayFrame.MAGIC.size) return -1
+        val last = buffered.size - GatewayFrame.MAGIC.size
+        for (index in start..last) {
+            if (startsWithMagic(index)) return index
+        }
+        return -1
+    }
+
+    private fun startsWithMagic(offset: Int): Boolean {
+        if (offset < 0 || offset + GatewayFrame.MAGIC.size > buffered.size) return false
+        return GatewayFrame.MAGIC.indices.all { buffered[offset + it] == GatewayFrame.MAGIC[it] }
+    }
+
+    private fun discardPrefix(count: Int) {
+        if (count <= 0) return
+        val bounded = count.coerceAtMost(buffered.size)
+        buffered = buffered.copyOfRange(bounded, buffered.size)
+        discardedByteCount += bounded
+        recoveryCount++
+    }
+
+    private fun discardUnframedBytesPreservingMagicPrefix() {
+        val maximumSuffix = minOf(GatewayFrame.MAGIC.size - 1, buffered.size)
+        var suffix = 0
+        for (count in maximumSuffix downTo 1) {
+            val matches = (0 until count).all { index ->
+                buffered[buffered.size - count + index] == GatewayFrame.MAGIC[index]
+            }
+            if (matches) {
+                suffix = count
+                break
+            }
+        }
+        discardPrefix(buffered.size - suffix)
     }
 }

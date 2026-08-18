@@ -21,6 +21,31 @@ data class CanObservation(
 
     override fun hashCode(): Int = 31 * sourceSequence.hashCode() + data.contentHashCode()
 
+    /** Rebuild the deployed live record for explicitly labeled historical replay. */
+    fun encodeLive(): ByteArray {
+        require(dataLength in 0..8 && data.size == 8) {
+            "CAN observation data shape is invalid: DLC $dataLength, storage ${data.size} bytes."
+        }
+        require(bitrateBps == 250_000 || bitrateBps == 500_000) {
+            "Unsupported CAN bitrate: $bitrateBps."
+        }
+        return ByteArray(RECORD_BYTES).also { bytes ->
+            bytes[0] = 1
+            bytes[1] = (
+                (if (extended) 0x01 else 0) or
+                    (if (remoteRequest) 0x02 else 0) or
+                    (if (listenOnly) 0x04 else 0)
+                ).toByte()
+            bytes[2] = dataLength.toByte()
+            bytes[3] = if (bitrateBps == 250_000) 2 else 1
+            bytes.putU32(4, identifier)
+            bytes.putU64(8, sourceSequence)
+            bytes.putU64(16, monotonicMicroseconds)
+            bytes.putU32(24, sessionId)
+            data.copyInto(bytes, 28)
+        }
+    }
+
     companion object {
         const val RECORD_BYTES = 36
 
