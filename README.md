@@ -2,9 +2,9 @@
 
 ## Install on the head unit
 
-### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.4/app-debug.apk)
+### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.5/app-debug.apk)
 
-Current public development build: **0.1.0-dev.4** (`app-debug.apk`, 2.6 MB). The link above
+Current public development build: **0.1.0-dev.5** (`app-debug.apk`, 2,657,928 bytes). The link above
 downloads the installer directly and does not require a GitHub account.
 
 While the vehicle is parked:
@@ -15,7 +15,7 @@ While the vehicle is parked:
 4. Tap **Install**, then **Open**.
 
 [Open the public Release Hub](https://isaiahdupree.github.io/4runner-vhos-release-hub/) ·
-[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.4)
+[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.5)
 
 ## Installed in the 4Runner
 
@@ -43,6 +43,8 @@ The first vertical slice provides:
 - append-only local storage for validated raw logical frames and CAN observations, including
   transactional materialization of CRC-valid persistent capture records;
 - real gateway, protocol, frame, error, and freshness indicators;
+- direct reconnect to the last CRC-handshake-validated gateway before any scan;
+- bounded API 33 BLE scans with named platform errors, exponential cooldown, and owner retry;
 - recent evidence export and checksummed Android/iPhone handoff bundles;
 - a connected-device foreground service for an explicitly started vehicle session; and
 - a signed public Release Hub with APK hash, package, version, and signing-certificate verification
@@ -72,3 +74,5 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership boundaries and
 [docs/DEVICE-CONNECTION-CONTRACTS.md](docs/DEVICE-CONNECTION-CONTRACTS.md) for the exact devices and
 services the app accepts. The one-trip vehicle test is in
 [docs/HEAD-UNIT-COMMISSIONING.md](docs/HEAD-UNIT-COMMISSIONING.md).
+The installed Android 13 recovery state machine is documented in
+[docs/API33-BLE-RECOVERY.md](docs/API33-BLE-RECOVERY.md).

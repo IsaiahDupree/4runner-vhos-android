@@ -76,16 +76,20 @@ class MainActivity : Activity() {
         root.addView(statusText)
 
         val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
             setPadding(0, dp(12), 0, dp(12))
         }
-        controls.addView(button("Start / Reacquire") { startVehicleSession() })
-        controls.addView(button("Stop") { sendServiceAction(VehicleSessionService.ACTION_STOP) })
-        controls.addView(button("Release for iPhone") { sendServiceAction(VehicleSessionService.ACTION_RELEASE) })
-        controls.addView(button("Export") { prepareExport() })
-        controls.addView(button("Import") { chooseImport() })
-        controls.addView(button("Permissions") { openAppSettings() })
+        controls.addView(controlRow(
+            "Connect / Reacquire" to ::startVehicleSession,
+            "Stop" to { sendServiceAction(VehicleSessionService.ACTION_STOP) },
+            "Release for iPhone" to { sendServiceAction(VehicleSessionService.ACTION_RELEASE) },
+        ))
+        controls.addView(controlRow(
+            "Bluetooth settings" to ::openBluetoothSettings,
+            "Permissions" to ::openAppSettings,
+            "Export" to ::prepareExport,
+            "Import" to ::chooseImport,
+        ))
         root.addView(controls)
 
         val columns = LinearLayout(this).apply {
@@ -231,6 +235,11 @@ class MainActivity : Activity() {
         statusText.text = getString(
             R.string.system_status_format,
             if (snapshot.running) "ACTIVE" else "IDLE",
+            when {
+                snapshot.obd.phase == dev.vhos.model.ConnectionPhase.RELEASED_FOR_EXTERNAL_CLIENT -> "IPHONE"
+                snapshot.running -> "ANDROID"
+                else -> "NONE"
+            },
             snapshot.status,
         )
         statusText.setTextColor(levelColor(if (snapshot.running) IndicatorLevel.ACTIVE else IndicatorLevel.WAIT))
@@ -255,7 +264,19 @@ class MainActivity : Activity() {
         appendLine("Source: ${device.sourceId ?: "unverified"}  Firmware: ${device.firmwareVersion ?: "—"}")
         appendLine("VHOS frames: ${device.logicalFrames}  persisted: ${device.persistedFrames}")
         appendLine("Vehicle frames: ${device.vehicleFrames}  bitrate: ${device.bitrateBps ?: "—"}")
-        append("CRC: ${device.crcFailures}  protocol: ${device.protocolFailures}  bus errors/off: ${device.busErrors}/${device.busOffEvents}")
+        appendLine("CRC: ${device.crcFailures}  protocol: ${device.protocolFailures}  bus errors/off: ${device.busErrors}/${device.busOffEvents}")
+        if (device.transportErrorName != null || device.platformErrorCode != null) {
+            appendLine(
+                "Android transport: ${device.transportErrorName ?: "UNKNOWN"}" +
+                    device.platformErrorCode?.let { " ($it)" }.orEmpty()
+            )
+        }
+        if (device.recoveryAttempt > 0) {
+            append("Recovery: attempt ${device.recoveryAttempt}")
+            device.nextRetryAtEpochMs?.let { append("  next: ${Instant.ofEpochMilli(it)}") }
+        } else {
+            append("Recovery: idle")
+        }
     }
 
     private fun renderRelease(snapshot: ReleaseHubSnapshot) {
@@ -309,6 +330,10 @@ class MainActivity : Activity() {
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
 
+    private fun openBluetoothSettings() {
+        startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+    }
+
     private fun card(size: Float): TextView = TextView(this).apply {
         textSize = size
         setPadding(dp(18), dp(16), dp(18), dp(16))
@@ -323,6 +348,13 @@ class MainActivity : Activity() {
         setOnClickListener { action() }
         layoutParams = LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginEnd = dp(8) }
     }
+
+    private fun controlRow(vararg controls: Pair<String, () -> Unit>): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            controls.forEach { (label, action) -> addView(button(label, action)) }
+        }
 
     private fun weightedCardParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
         marginEnd = dp(10)

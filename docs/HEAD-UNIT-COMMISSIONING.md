@@ -52,6 +52,10 @@ verification.
 7. Use **Release for iPhone**, connect with iPhone, then disconnect iPhone and explicitly reacquire
    from Android.
 
+The installed Android 13/API 33 recovery procedure and adversarial radio tests are defined in
+[API33-BLE-RECOVERY.md](API33-BLE-RECOVERY.md). Do not run Android and iPhone auto-reacquisition at
+the same time; use the explicit owner controls.
+
 ## Single vehicle trip
 
 1. With the vehicle parked, connect the gateway to DLC3 and start Android capture.

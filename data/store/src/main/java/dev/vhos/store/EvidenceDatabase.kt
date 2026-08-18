@@ -126,6 +126,36 @@ class EvidenceDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
+    fun latestValidatedSources(): List<PersistedSource> {
+        val latestByRole = linkedMapOf<DeviceRole, PersistedSource>()
+        readableDatabase.query(
+            "sources",
+            arrayOf("source_id", "role", "bluetooth_address", "identity_json", "validated_at"),
+            "bluetooth_address <> ?",
+            arrayOf("IMPORTED"),
+            null,
+            null,
+            "validated_at DESC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val role = DeviceRole.entries.firstOrNull { it.wireValue == cursor.getString(1) }
+                    ?: continue
+                latestByRole.putIfAbsent(
+                    role,
+                    PersistedSource(
+                        sourceId = cursor.getString(0),
+                        role = role,
+                        bluetoothAddress = cursor.getString(2),
+                        identityJson = cursor.getString(3),
+                        validatedAt = cursor.getString(4),
+                    ),
+                )
+            }
+        }
+        return latestByRole.values.toList()
+    }
+
+    @Synchronized
     fun persistFrame(
         sourceId: String,
         sourceRole: DeviceRole,

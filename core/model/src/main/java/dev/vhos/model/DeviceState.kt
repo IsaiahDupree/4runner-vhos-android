@@ -19,6 +19,8 @@ enum class ConnectionPhase(val displayName: String) {
     STREAMING("Streaming"),
     DEGRADED("Degraded"),
     RECONNECTING("Reconnecting"),
+    RECOVERY_COOLDOWN("Recovery cooldown"),
+    RECOVERY_PAUSED("Recovery paused"),
     RELEASED_FOR_EXTERNAL_CLIENT("Released for iPhone"),
     INCOMPATIBLE("Incompatible"),
     FIRMWARE_NOT_READY("Firmware not ready"),
@@ -47,6 +49,10 @@ data class DeviceSnapshot(
     val busOffEvents: Long = 0,
     val listenOnly: Boolean? = null,
     val bitrateBps: Long? = null,
+    val platformErrorCode: Int? = null,
+    val transportErrorName: String? = null,
+    val recoveryAttempt: Int = 0,
+    val nextRetryAtEpochMs: Long? = null,
 ) {
     companion object {
         fun initial(role: DeviceRole): DeviceSnapshot = when (role) {
