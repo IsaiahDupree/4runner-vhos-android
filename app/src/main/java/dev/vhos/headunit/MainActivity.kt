@@ -42,6 +42,9 @@ import dev.vhos.discovery.HistoricalReplayReport
 import dev.vhos.discovery.LINK_RELIABILITY_LABEL
 import dev.vhos.discovery.LinkReliabilityLab
 import dev.vhos.discovery.LinkReliabilityMatrixReport
+import dev.vhos.discovery.SignalHypothesisCatalog
+import dev.vhos.discovery.SignalHypothesisEvaluationReport
+import dev.vhos.discovery.SignalHypothesisEvaluator
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
 import dev.vhos.model.IndicatorLevel
@@ -69,6 +72,7 @@ class MainActivity : Activity() {
     private lateinit var vehicleProfileCard: TextView
     private lateinit var healthMapCard: TextView
     private lateinit var discoveryCard: TextView
+    private lateinit var hypothesisCard: TextView
     private lateinit var replayCard: TextView
     private lateinit var reliabilityCard: TextView
     private lateinit var releaseCard: TextView
@@ -208,6 +212,15 @@ class MainActivity : Activity() {
         root.addView(controlRow(
             "Analyze saved CAN" to ::refreshDiscovery,
         ))
+
+        hypothesisCard = card(16f).apply {
+            text = getString(R.string.signal_research_wait)
+            setTextColor(levelColor(IndicatorLevel.WAIT))
+        }
+        root.addView(hypothesisCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
 
         replayCard = card(16f).apply {
             text = buildString {
@@ -592,6 +605,10 @@ class MainActivity : Activity() {
             discoveryCard.text = getString(R.string.can_discovery_analyzing)
             discoveryCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
         }
+        if (::hypothesisCard.isInitialized) {
+            hypothesisCard.text = getString(R.string.signal_research_analyzing)
+            hypothesisCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
+        }
         Thread {
             try {
                 val total = store.counts().canObservations
@@ -603,16 +620,40 @@ class MainActivity : Activity() {
                             append("No vehicle value is inferred while raw evidence is absent.")
                         }
                         discoveryCard.setTextColor(levelColor(IndicatorLevel.WAIT))
+                        hypothesisCard.text = buildString {
+                            appendLine("SIGNAL RESEARCH  NO EVIDENCE")
+                            appendLine("The pinned research pack is available, but no retained target bytes exist.")
+                            append("No candidate or vehicle value is produced.")
+                        }
+                        hypothesisCard.setTextColor(levelColor(IndicatorLevel.WAIT))
                     }
                     return@Thread
                 }
                 val persisted = store.recentCanObservations(DISCOVERY_RECORD_LIMIT)
-                val report = CanDiscoveryAnalyzer.analyze(
-                    persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
-                )
+                val observations = persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
+                val report = CanDiscoveryAnalyzer.analyze(observations)
+                val hypothesisResult = runCatching {
+                    SignalHypothesisEvaluator.evaluate(
+                        observations,
+                        SignalHypothesisCatalog.loadBundled(),
+                    )
+                }
                 runOnUiThread {
                     discoveryCard.text = discoveryText(report, total)
                     discoveryCard.setTextColor(levelColor(IndicatorLevel.CHECK))
+                    hypothesisResult.fold(
+                        onSuccess = { signalReport ->
+                            hypothesisCard.text = hypothesisText(signalReport)
+                            hypothesisCard.setTextColor(levelColor(IndicatorLevel.CHECK))
+                        },
+                        onFailure = { error ->
+                            hypothesisCard.text = getString(
+                                R.string.signal_research_unavailable_format,
+                                error.message ?: error.javaClass.simpleName,
+                            )
+                            hypothesisCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
+                        },
+                    )
                 }
             } catch (error: Exception) {
                 runOnUiThread {
@@ -621,6 +662,11 @@ class MainActivity : Activity() {
                         error.message ?: error.javaClass.simpleName,
                     )
                     discoveryCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
+                    hypothesisCard.text = getString(
+                        R.string.signal_research_unavailable_format,
+                        error.message ?: error.javaClass.simpleName,
+                    )
+                    hypothesisCard.setTextColor(levelColor(IndicatorLevel.BLOCKED))
                 }
             }
         }.start()
@@ -697,6 +743,56 @@ class MainActivity : Activity() {
         }
         appendLine()
         append("INTERPRETATION LOCK • RPM, speed, gear, throttle, steering, brake, and health thresholds remain unavailable until an independent reference capture validates exact bytes, scaling, applicability, and lineage.")
+    }
+
+    private fun hypothesisText(report: SignalHypothesisEvaluationReport): String = buildString {
+        appendLine("SIGNAL RESEARCH  ${report.requiredBadge}")
+        appendLine(
+            "PACK ${report.packId}@${report.packVersion} • SHA-256 ${report.packSha256.take(12)}…"
+        )
+        appendLine(
+            "${report.status} • accepted definitions ${report.acceptedSignalDefinitions} • " +
+                "production display BLOCKED"
+        )
+        val present = report.evaluations.filter { it.records > 0 }.sortedWith(
+            compareByDescending<dev.vhos.discovery.SignalHypothesisEvaluation> {
+                it.hypothesisStatus.startsWith("HIGH_PRIORITY")
+            }.thenByDescending { it.records }.thenBy { it.identifier }
+        )
+        appendLine()
+        appendLine("TARGET BYTES + CROSS-MODEL RESEARCH")
+        present.take(8).forEach { candidate ->
+            val semantic = candidate.candidateSemantic
+                ?.replace('.', ' ')
+                ?.replace('-', ' ')
+                ?.uppercase(Locale.US)
+                ?: "UNKNOWN SEMANTIC"
+            appendLine(
+                "${candidate.identifierHex}  $semantic • ${candidate.hypothesisStatus} • " +
+                    "${candidate.records} records/${candidate.sessions} sessions • " +
+                    candidate.targetEvidenceStatus
+            )
+            candidate.fieldValues?.let { raw ->
+                appendLine(
+                    "  raw candidate field ${decimal(raw.minimum, 2)}–${decimal(raw.maximum, 2)} • " +
+                        "mean ${decimal(raw.mean, 2)}"
+                )
+            }
+            candidate.transformEvaluations.take(2).forEach { transform ->
+                appendLine(
+                    "  ${transform.transformId}: candidate ${decimal(transform.summary.minimum, 2)}–" +
+                        "${decimal(transform.summary.maximum, 2)} ${transform.unit} • " +
+                        "${transform.sourceIds.size} source references • NOT VERIFIED"
+                )
+            }
+            candidate.requiredValidation.firstOrNull()?.let { appendLine("  gate: $it") }
+        }
+        if (present.isEmpty()) {
+            appendLine("None of the pack's candidate identifiers appears in retained evidence.")
+        }
+        appendLine()
+        appendLine("AUTHORITY ${report.allowedSurface} ONLY")
+        append("Candidate ranges show what pinned cross-model transforms produce on saved bytes. They never update owner health, findings, maintenance, recommendations, or lifecycle baselines.")
     }
 
     private fun startHistoricalReplay(repeat: Int, paced: Boolean) {

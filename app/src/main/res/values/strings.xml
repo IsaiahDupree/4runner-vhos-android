@@ -10,4 +10,7 @@
     <string name="can_discovery_wait">CAN DISCOVERY  WAIT\nNo persisted CAN observations have been analyzed yet.</string>
     <string name="can_discovery_analyzing">CAN DISCOVERY  ANALYZING\nReading append-only observations…</string>
     <string name="can_discovery_unavailable_format">CAN DISCOVERY  UNAVAILABLE\n%1$s</string>
+    <string name="signal_research_wait">SIGNAL RESEARCH  WAIT\nNo versioned hypothesis pack has been evaluated against retained evidence yet.</string>
+    <string name="signal_research_analyzing">SIGNAL RESEARCH  ANALYZING\nVerifying the pinned pack and evaluating saved listen-only bytes…</string>
+    <string name="signal_research_unavailable_format">SIGNAL RESEARCH  UNAVAILABLE\n%1$s</string>
 </resources>

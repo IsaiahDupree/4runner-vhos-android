@@ -1,0 +1,490 @@
+{
+  "contract": "can.signal-hypothesis-pack",
+  "contract_version": "1.0.0",
+  "pack_id": "toyota.4runner.2005.passive-can-hypotheses",
+  "pack_version": "0.3.0",
+  "target": {
+    "make": "Toyota",
+    "model": "4Runner",
+    "model_year": 2005,
+    "engine": null,
+    "drivetrain": null,
+    "vin_resolved": false
+  },
+  "authority": {
+    "status": "DISCOVERY_ONLY",
+    "accepted_signal_definitions": 0,
+    "production_value_display_allowed": false,
+    "automatic_promotion_allowed": false,
+    "statement": "These are cross-model research hypotheses evaluated against target-vehicle raw evidence. They are not accepted signal definitions and may appear only on an engineering research surface with an unverified badge."
+  },
+  "sources": [
+    {
+      "source_id": "csu-toyota-can-2010-camry",
+      "authority_level": "B",
+      "publisher": "Colorado State University",
+      "url": "https://www.engr.colostate.edu/~jdaily/tucrrc/ToyotaCAN.html",
+      "revision": null,
+      "scope": "Independent physical-measurement correlation of an 11-bit, 500 kbit/s CAN network on a 2010 Toyota Camry.",
+      "limitations": "The vehicle, ECUs, calibration, options, and model year differ from the target 2005 4Runner. Its identifiers and fields are discovery clues only."
+    },
+    {
+      "source_id": "realdash-fj-cruiser-cedfdf49",
+      "authority_level": "C",
+      "publisher": "RealDash-extras contributor M. Main",
+      "url": "https://github.com/janimm/RealDash-extras/blob/cedfdf491b53d331625930909f949b657441f4a3/RealDash-CAN/XML-files/toyota/toyota_fj_can.xml",
+      "revision": "cedfdf491b53d331625930909f949b657441f4a3",
+      "scope": "Community mapping labeled for a 2012 Toyota FJ Cruiser, a useful related-platform source for field and scaling hypotheses.",
+      "limitations": "Community artifact, later model year, and no exact 2005 4Runner applicability proof. It cannot establish a production decode by itself."
+    },
+    {
+      "source_id": "comma-opendbc-b4ef5e1",
+      "authority_level": "C",
+      "publisher": "comma.ai opendbc",
+      "url": "https://github.com/commaai/opendbc/tree/b4ef5e1cf406ff143fa67bdbfb154739d43279c9/opendbc/dbc",
+      "revision": "b4ef5e1cf406ff143fa67bdbfb154739d43279c9",
+      "scope": "Version-pinned Toyota DBC corpus showing recurring but generation-dependent steering, accelerator, brake, and engine-speed definitions.",
+      "limitations": "No exact 2005 4Runner DBC is present. The 2009 iQ steering definition is signed 11-bit at 1 degree/count while Prius and generated Toyota definitions are signed 12-bit at 1.5 degrees/count, directly demonstrating that field recurrence is not universal applicability."
+    },
+    {
+      "source_id": "aim-community-dbc-6e2f88f",
+      "authority_level": "C",
+      "publisher": "CAN-DBC-Collection",
+      "url": "https://github.com/billyjack2/CAN-DBC-Collection/blob/6e2f88fd6cd9c1f47d0db7bd022711b106f27027/TOYOTA/LEXUS/can1v3.dbc",
+      "revision": "6e2f88fd6cd9c1f47d0db7bd022711b106f27027",
+      "scope": "Community transcription labeled as an AiM Toyota/Lexus protocol, including 0x025, 0x224, 0x2C1, and 0x2C4 candidates.",
+      "limitations": "No exact target applicability proof and no repository license was established for importing its definitions as accepted project data."
+    },
+    {
+      "source_id": "aim-community-auris-6e2f88f",
+      "authority_level": "C",
+      "publisher": "CAN-DBC-Collection",
+      "url": "https://github.com/billyjack2/CAN-DBC-Collection/blob/6e2f88fd6cd9c1f47d0db7bd022711b106f27027/TOYOTA/AURIS/can1v3.dbc",
+      "revision": "6e2f88fd6cd9c1f47d0db7bd022711b106f27027",
+      "scope": "Community transcription labeled as an AiM Toyota Auris protocol, including 0x0B0, 0x0B2, 0x224, 0x2C1, 0x2C4, and 0x620 candidates.",
+      "limitations": "No model year or exact target applicability proof; definitions remain cross-model hypotheses only."
+    },
+    {
+      "source_id": "aim-community-lexus-is-f-6e2f88f",
+      "authority_level": "C",
+      "publisher": "CAN-DBC-Collection",
+      "url": "https://github.com/billyjack2/CAN-DBC-Collection/blob/6e2f88fd6cd9c1f47d0db7bd022711b106f27027/LEXUS/IS_F/can1v3.dbc",
+      "revision": "6e2f88fd6cd9c1f47d0db7bd022711b106f27027",
+      "scope": "Community transcription labeled as an AiM Lexus IS F protocol, including 0x025, 0x0B0, 0x0B2, 0x0B4, 0x224, 0x2C1, and 0x2C4 candidates.",
+      "limitations": "No model year or exact target applicability proof; its brake-pressure and intake-temperature transforms conflict with other pinned sources."
+    },
+    {
+      "source_id": "umich-cids-camry-2010",
+      "authority_level": "B",
+      "publisher": "University of Michigan / USENIX Security",
+      "url": "https://rtcl.eecs.umich.edu/rtclweb/assets/publications/2016/sec16-final165_final.pdf",
+      "revision": null,
+      "scope": "Peer-reviewed transmitter-fingerprinting analysis using 2010 Camry CAN data and a separate ground-truth method.",
+      "limitations": "It establishes transmitter grouping, including 0x223 with 0x224, but not payload semantics, field scaling, or target applicability."
+    },
+    {
+      "source_id": "nfi-lexus-is250-evu-2016",
+      "authority_level": "B",
+      "publisher": "Netherlands Forensic Institute / 25th EVU Congress",
+      "url": "https://www.researchgate.net/publication/355445796_Evaluation_of_a_common_practice_-_to_calculate_speed_from_EDR-reported_RPM",
+      "revision": null,
+      "scope": "Primary 2010 Lexus IS250 experiment with synchronized physical references, DLC CAN logging, controlled driving, and EDR replay; corroborates RPM-related 0x2C4/0x2D0 behavior and pedal-related 0x2C1 byte position 7.",
+      "limitations": "Cross-model evidence only. It does not establish target scaling, the FJ 0x2D0 turbine transform, or a universal selector/gear byte."
+    },
+    {
+      "source_id": "yaris-listen-only-ddd7a2b",
+      "authority_level": "C",
+      "publisher": "P1kachu talking-with-cars",
+      "url": "https://github.com/P1kachu/talking-with-cars/blob/ddd7a2b7137a67aeac84a0eb858b57bc08aee38c/notes/toyota-yaris.md",
+      "revision": "ddd7a2b7137a67aeac84a0eb858b57bc08aee38c",
+      "scope": "Explicitly listen-only Yaris notes that associate the first 16 bits of 0x2C4 with high-rate engine revolutions and record wheel/brake candidates.",
+      "limitations": "The author labels fields as guessed; model year, engineering-unit scales, and exact target applicability are not established."
+    }
+  ],
+  "hypotheses": [
+    {
+      "hypothesis_id": "toyota.2c4.engine-speed.be16",
+      "identifier": 708,
+      "identifier_hex": "0x2C4",
+      "extended": false,
+      "candidate_semantic": "engine.speed",
+      "status": "HIGH_PRIORITY_CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 0,
+        "byte_length": 2,
+        "endianness": "BIG",
+        "mask": 65535,
+        "right_shift": 0,
+        "signed_bits": null
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "toyota-rpm-x0p78125",
+          "scale": 0.78125,
+          "offset": 0,
+          "unit": "rpm",
+          "source_ids": [
+            "realdash-fj-cruiser-cedfdf49",
+            "aim-community-dbc-6e2f88f",
+            "aim-community-auris-6e2f88f",
+            "aim-community-lexus-is-f-6e2f88f"
+          ],
+          "note": "The pinned FJ, generic Toyota/Lexus, Auris, and Lexus IS F artifacts all use raw times 0.78125 for this identifier. Repository independence is not assumed where definitions may share an upstream source."
+        }
+      ],
+      "source_ids": [
+        "csu-toyota-can-2010-camry",
+        "realdash-fj-cruiser-cedfdf49",
+        "aim-community-dbc-6e2f88f",
+        "aim-community-auris-6e2f88f",
+        "aim-community-lexus-is-f-6e2f88f",
+        "yaris-listen-only-ddd7a2b",
+        "nfi-lexus-is250-evu-2016"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Capture SAE J1979 PID 0x0C or Toyota Techstream engine speed on the same gateway monotonic timeline.",
+        "Verify scale, zero behavior, cadence, missing/stale handling, and repeatability across engine-off, idle, and separated throttle segments.",
+        "Resolve the target VIN, engine, drivetrain, and emissions configuration before promotion."
+      ],
+      "limitations": "The identifier and byte field recur in Toyota research, but no authoritative exact-vehicle source has established the 2005 4Runner scaling."
+    },
+    {
+      "hypothesis_id": "toyota.2c4.intake-air-temperature.byte3",
+      "identifier": 708,
+      "identifier_hex": "0x2C4",
+      "extended": false,
+      "candidate_semantic": "engine.intake-air-temperature",
+      "status": "CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 3,
+        "byte_length": 1,
+        "endianness": "BIG",
+        "mask": 255,
+        "right_shift": 0,
+        "signed_bits": null
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "fj-intake-air-temperature-raw-degc",
+          "scale": 1,
+          "offset": 0,
+          "unit": "degC",
+          "source_ids": ["realdash-fj-cruiser-cedfdf49"],
+          "note": "The related-platform file labels byte 3 as intake-air temperature with no offset."
+        },
+        {
+          "transform_id": "lexus-is-f-intake-air-temperature-x2p5-minus40-degc",
+          "scale": 2.5,
+          "offset": -40,
+          "unit": "degC",
+          "source_ids": ["aim-community-lexus-is-f-6e2f88f"],
+          "note": "The pinned Lexus IS F artifact assigns a conflicting 2.5*raw-40 transform to the candidate byte, so neither temperature formula can be accepted without an independent reference."
+        }
+      ],
+      "source_ids": [
+        "realdash-fj-cruiser-cedfdf49",
+        "aim-community-lexus-is-f-6e2f88f"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Compare against SAE J1979 PID 0x0F or Toyota Techstream intake-air temperature during cold soak and warm operation.",
+        "Verify whether an offset is required and reject the hypothesis if the raw field does not track the independent reference."
+      ],
+      "limitations": "Two related-platform community sources associate the candidate byte with intake-air temperature but disagree on scale and offset. The apparently plausible target range is not semantic proof."
+    },
+    {
+      "hypothesis_id": "toyota.2d0.turbine-speed.be16",
+      "identifier": 720,
+      "identifier_hex": "0x2D0",
+      "extended": false,
+      "candidate_semantic": "transmission.turbine-speed",
+      "status": "CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 0,
+        "byte_length": 2,
+        "endianness": "BIG",
+        "mask": 65535,
+        "right_shift": 0,
+        "signed_bits": null
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "fj-turbine-rpm-x0p390625",
+          "scale": 0.390625,
+          "offset": 0,
+          "unit": "rpm",
+          "source_ids": ["realdash-fj-cruiser-cedfdf49"],
+          "note": "The related-platform file labels the first word turbine RPM and divides raw by 2.56."
+        }
+      ],
+      "source_ids": [
+        "csu-toyota-can-2010-camry",
+        "realdash-fj-cruiser-cedfdf49",
+        "nfi-lexus-is250-evu-2016"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Compare the candidate against Techstream turbine/input speed, engine speed, vehicle speed, selected gear, and converter lockup across park, launch, shifts, coast, and stop.",
+        "Require the engine/turbine relationship to change consistently with known driveline states before assigning the semantic."
+      ],
+      "limitations": "CSU left this identifier unknown on a 2010 Camry. The NFI Lexus study found RPM-related data in 0x2D0 but did not establish the FJ turbine interpretation or scale, which still come from one later related-platform community mapping."
+    },
+    {
+      "hypothesis_id": "toyota.2d0.selector-code.byte2",
+      "identifier": 720,
+      "identifier_hex": "0x2D0",
+      "extended": false,
+      "candidate_semantic": "transmission.selector-code",
+      "status": "CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 2,
+        "byte_length": 1,
+        "endianness": "BIG",
+        "mask": 127,
+        "right_shift": 0,
+        "signed_bits": null
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "fj-selector-enum-code",
+          "scale": 1,
+          "offset": 0,
+          "unit": "enum_code",
+          "source_ids": ["realdash-fj-cruiser-cedfdf49"],
+          "note": "The related-platform source assigns selector states to this masked byte; target enum meanings remain unverified."
+        }
+      ],
+      "source_ids": [
+        "realdash-fj-cruiser-cedfdf49",
+        "nfi-lexus-is250-evu-2016"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Record explicit P, R, N, D, and manual-selector markers while stationary with the brake applied.",
+        "Require stable, repeatable one-to-one codes before assigning selector labels."
+      ],
+      "limitations": "The target capture contains only a small unlabeled code set and cannot establish which state any code represents. The NFI Lexus paper places current gear in its fifth byte position, while the FJ artifact places a selector candidate in its third byte position; the conflict blocks cross-model field promotion."
+    },
+    {
+      "hypothesis_id": "toyota.2c1.accelerator-pedal.byte6",
+      "identifier": 705,
+      "identifier_hex": "0x2C1",
+      "extended": false,
+      "candidate_semantic": "engine.accelerator-pedal-position",
+      "status": "HIGH_PRIORITY_CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 6,
+        "byte_length": 1,
+        "endianness": "BIG",
+        "mask": 255,
+        "right_shift": 0,
+        "signed_bits": null
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "fj-pedal-x0p5-percent",
+          "scale": 0.5,
+          "offset": 0,
+          "unit": "percent",
+          "source_ids": [
+            "realdash-fj-cruiser-cedfdf49",
+            "comma-opendbc-b4ef5e1",
+            "aim-community-auris-6e2f88f",
+            "aim-community-lexus-is-f-6e2f88f"
+          ],
+          "note": "CSU independently identifies one-indexed byte 7 as throttle-pedal behavior; the FJ, generated Toyota, Auris, and Lexus IS F artifacts supply the 0.5 percent-per-count hypothesis."
+        }
+      ],
+      "source_ids": [
+        "csu-toyota-can-2010-camry",
+        "realdash-fj-cruiser-cedfdf49",
+        "comma-opendbc-b4ef5e1",
+        "aim-community-dbc-6e2f88f",
+        "aim-community-auris-6e2f88f",
+        "aim-community-lexus-is-f-6e2f88f",
+        "nfi-lexus-is250-evu-2016"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Compare against SAE J1979 PID 0x49 when supported or Toyota Techstream accelerator position using rest and at least three separated stable pedal levels.",
+        "Verify the field returns repeatably, has no counter/checksum role, and distinguishes pedal position from commanded throttle."
+      ],
+      "limitations": "The CSU Camry and NFI Lexus experiments independently support pedal-related behavior at this byte position, but the current target captures are unlabeled, so range and activity cannot prove that driver pedal movement caused the field or that the cross-model scale applies."
+    },
+    {
+      "hypothesis_id": "toyota.025.steering-angle.signed12",
+      "identifier": 37,
+      "identifier_hex": "0x025",
+      "extended": false,
+      "candidate_semantic": "steering.wheel-angle",
+      "status": "HIGH_PRIORITY_CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 0,
+        "byte_length": 2,
+        "endianness": "BIG",
+        "mask": 4095,
+        "right_shift": 0,
+        "signed_bits": 12
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "opendbc-toyota-signed12-x1p5-deg",
+          "scale": 1.5,
+          "offset": 0,
+          "unit": "deg",
+          "source_ids": ["comma-opendbc-b4ef5e1"],
+          "note": "Pinned Prius 2010 and generated Toyota DBC sources use signed 12-bit counts times 1.5 degrees."
+        },
+        {
+          "transform_id": "fj-signed12-xneg0p087890625-deg",
+          "scale": -0.087890625,
+          "offset": 0,
+          "unit": "deg",
+          "source_ids": ["realdash-fj-cruiser-cedfdf49"],
+          "note": "The related-platform circular-angle formula is equivalent to negative signed-12-bit counts times 360/4096."
+        }
+      ],
+      "source_ids": [
+        "csu-toyota-can-2010-camry",
+        "realdash-fj-cruiser-cedfdf49",
+        "comma-opendbc-b4ef5e1",
+        "aim-community-dbc-6e2f88f",
+        "aim-community-lexus-is-f-6e2f88f"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Record Techstream steering angle and physical center, left, and right markers over a broad range on the same monotonic timeline.",
+        "Resolve the conflicting cross-model scale and direction formulas with linear fit and repeat the test after an ignition cycle.",
+        "Verify bytes 4, 5, and 6 independently before treating their exact target agreement as redundancy."
+      ],
+      "limitations": "Sources agree strongly on the steering semantic family but not a universal layout: the pinned 2009 iQ definition is signed 11-bit at 1 degree/count, Prius and generated Toyota definitions are signed 12-bit at 1.5 degrees/count, and the FJ formula uses a very different scale and direction. No target degree value is accepted."
+    },
+    {
+      "hypothesis_id": "toyota.224.brake-pressure.be16-low9",
+      "identifier": 548,
+      "identifier_hex": "0x224",
+      "extended": false,
+      "candidate_semantic": "brakes.pedal-pressure",
+      "status": "CROSS_MODEL_CANDIDATE",
+      "field": {
+        "byte_offset": 4,
+        "byte_length": 2,
+        "endianness": "BIG",
+        "mask": 511,
+        "right_shift": 0,
+        "signed_bits": null
+      },
+      "candidate_transforms": [
+        {
+          "transform_id": "fj-brake-pressure-raw-count",
+          "scale": 1,
+          "offset": 0,
+          "unit": "raw_count",
+          "source_ids": [
+            "csu-toyota-can-2010-camry",
+            "realdash-fj-cruiser-cedfdf49"
+          ],
+          "note": "Both sources identify bytes 4 and 5 using zero-based indexing as a pressure-like field; no target engineering-unit scale is accepted."
+        }
+      ],
+      "source_ids": [
+        "csu-toyota-can-2010-camry",
+        "realdash-fj-cruiser-cedfdf49",
+        "aim-community-dbc-6e2f88f",
+        "aim-community-auris-6e2f88f",
+        "aim-community-lexus-is-f-6e2f88f"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Capture released, light, medium, and firm brake applications with Techstream pressure or an independent pressure reference.",
+        "Resolve bit placement and physical-unit scale before creating a signal definition."
+      ],
+      "limitations": "Every retained target frame is zero in the candidate field, so current evidence cannot test pressure response. Cross-model DBCs also disagree materially on field placement and scale; no pressure unit is accepted."
+    },
+    {
+      "hypothesis_id": "toyota.223.brake-stop-light.id-only",
+      "identifier": 547,
+      "identifier_hex": "0x223",
+      "extended": false,
+      "candidate_semantic": "brakes.stop-light-switch",
+      "status": "CROSS_MODEL_CANDIDATE",
+      "field": null,
+      "candidate_transforms": [],
+      "source_ids": [
+        "csu-toyota-can-2010-camry",
+        "realdash-fj-cruiser-cedfdf49",
+        "umich-cids-camry-2010"
+      ],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Record repeated brake press and release markers while observing all changing bits in 0x223.",
+        "Confirm the candidate against the physical brake lights and Techstream stop-light switch state."
+      ],
+      "limitations": "The target payload has two observed states, but the related-platform bit numbering does not yet map unambiguously to the changing target bit. CSU left the identifier unknown; the USENIX study proves only that 0x223 and 0x224 shared a transmitter on its Camry."
+    },
+    {
+      "hypothesis_id": "toyota.022.steering-like.id-only",
+      "identifier": 34,
+      "identifier_hex": "0x022",
+      "extended": false,
+      "candidate_semantic": "steering.related-unknown",
+      "status": "CORROBORATED_ID_ONLY",
+      "field": null,
+      "candidate_transforms": [],
+      "source_ids": ["csu-toyota-can-2010-camry"],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Use stationary left-center-right steering markers and compare every byte and bit field against 0x025 and Techstream steering-related values.",
+        "Do not assume the approximately 512-biased words are signed sensor values without causal reference data."
+      ],
+      "limitations": "The source describes steering-like behavior but supplies no accepted target field, scale, unit, or specific physical quantity."
+    },
+    {
+      "hypothesis_id": "toyota.023.unknown.id-only",
+      "identifier": 35,
+      "identifier_hex": "0x023",
+      "extended": false,
+      "candidate_semantic": null,
+      "status": "CORROBORATED_ID_ONLY",
+      "field": null,
+      "candidate_transforms": [],
+      "source_ids": ["csu-toyota-can-2010-camry"],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Rank its changing fields against synchronized steering, yaw, acceleration, brake, and speed references.",
+        "Retain DLC 7 when testing checksum and field hypotheses."
+      ],
+      "limitations": "The identifier and DLC recur cross-model, but both the research source and this project leave the physical meaning unknown."
+    },
+    {
+      "hypothesis_id": "toyota.420.unknown.id-only",
+      "identifier": 1056,
+      "identifier_hex": "0x420",
+      "extended": false,
+      "candidate_semantic": null,
+      "status": "UNMAPPED",
+      "field": null,
+      "candidate_transforms": [],
+      "source_ids": [],
+      "production_value_display_allowed": false,
+      "required_validation": [
+        "Collect broader labeled operating states and rank dynamic fields against independent references.",
+        "Do not assign a subsystem from arbitration identifier proximity or payload appearance."
+      ],
+      "limitations": "No mapping was found in the reviewed primary research or version-pinned source artifacts."
+    }
+  ],
+  "relationships": [
+    {
+      "relationship_id": "candidate-engine-rpm-vs-turbine-rpm",
+      "left_hypothesis_id": "toyota.2c4.engine-speed.be16",
+      "left_transform_id": "toyota-rpm-x0p78125",
+      "right_hypothesis_id": "toyota.2d0.turbine-speed.be16",
+      "right_transform_id": "fj-turbine-rpm-x0p390625",
+      "maximum_pairing_delta_us": 250000,
+      "interpretation": "If both cross-model transforms apply, the target traces can be compared in the same candidate RPM unit. Similarity supports the field-layout hypothesis but cannot distinguish turbine speed from another correlated rotational state.",
+      "production_value_display_allowed": false
+    }
+  ]
+}

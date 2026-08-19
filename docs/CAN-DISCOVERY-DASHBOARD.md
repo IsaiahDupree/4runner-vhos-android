@@ -1,6 +1,6 @@
 # CAN Discovery dashboard
 
-Status: discovery, richer raw-candidate rendering, and real historical replay implemented in Android `0.1.0-dev.10`
+Status: discovery, source-pinned hypothesis research, and real historical replay implemented in Android `0.1.0-dev.11`
 
 ## Purpose
 
@@ -14,6 +14,18 @@ The dashboard solves two different problems and keeps them visibly separate:
 2. prioritize controlled signal-discovery experiments.
 
 It does not diagnose the 4Runner and does not create a Vehicle Signal Pack.
+
+## Separate source-pinned research surface
+
+After raw discovery succeeds, Android evaluates the same immutable observations against the exact
+SHA-pinned `toyota.4runner.2005.passive-can-hypotheses@0.3.0` research pack. That second card is
+visibly labeled **UNVERIFIED CROSS-MODEL HYPOTHESIS** and **ENGINEERING_RESEARCH ONLY**. It can show
+candidate raw fields, the output range of source-pinned cross-model transforms, contradictory
+layouts, and the first required independent validation.
+
+It accepts zero production definitions and has no write path to owner health, findings,
+recommendations, maintenance, or the digital twin. Pack/hash/authority validation fails closed.
+See [Signal hypothesis research surface](SIGNAL-HYPOTHESIS-RESEARCH-SURFACE.md).
 
 ## Evidence path
 
@@ -168,6 +180,10 @@ The pure Kotlin analyzer is covered by golden records that exercise:
 - a known 2:1 raw-word relationship;
 - repeated dynamic byte channels; and
 - rejection of any record lacking listen-only proof.
+
+The separate hypothesis evaluator additionally verifies the exact pack SHA-256, zero accepted
+definitions, research-only transforms over retained evidence, rejection of elevated authority, and
+rejection of input without listen-only proof.
 
 The replay suites additionally cover a checksum-pinned real fixture, twenty repeated passes,
 hostile fragmentation, dropped notification fragments, corrupt payloads, mid-frame disconnects,

@@ -7,10 +7,11 @@
 Current public development build: **0.1.0-dev.6** (`app-debug.apk`, 2,697,891 bytes). The link above
 downloads the installer directly and does not require a GitHub account.
 
-Current source candidate: **0.1.0-dev.10**. It adds a 15-scenario real-evidence link-reliability
-matrix, 20-cycle soak, stale-epoch/duplicate rejection, bounded-buffer diagnostics, richer raw CAN
-candidate display, and a recovery-counter fix for repeated Android GATT failures. It is not the
-public installer until its release artifact and catalog entry are signed and published.
+Current source candidate: **0.1.0-dev.11**. It adds a SHA-pinned, fail-closed Toyota signal
+hypothesis research surface on top of the dev10 real-evidence link-reliability lab and richer raw
+CAN discovery display. Cross-model transforms are visibly unverified, zero definitions are accepted,
+and no candidate can update owner health or the digital twin. It is not the public installer until
+its release artifact and catalog entry are signed and published.
 
 While the vehicle is parked:
 
@@ -49,6 +50,8 @@ The first vertical slice provides:
   transactional materialization of CRC-valid persistent capture records;
 - a versioned CAN Discovery dashboard for acquisition facts, sampled coverage, raw activity,
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
+- a SHA-pinned **UNVERIFIED CROSS-MODEL HYPOTHESIS** research surface that evaluates retained
+  listen-only bytes while keeping production display, automatic promotion, and digital-twin writes blocked;
 - a read-only **HISTORICAL REPLAY • NOT LIVE** surface that replays persisted real CAN evidence
   through the production envelope/stream/CAN decoders at source time or full-speed ×20 load;
 - self-resynchronizing frame decoding with explicit corruption, discarded-byte, and recovery
@@ -127,6 +130,9 @@ The installed Android 13 recovery state machine is documented in
 [docs/API33-BLE-RECOVERY.md](docs/API33-BLE-RECOVERY.md).
 The evidence interpretation boundary and current 5,176-record baseline are documented in
 [docs/CAN-DISCOVERY-DASHBOARD.md](docs/CAN-DISCOVERY-DASHBOARD.md).
+The exact Toyota research-pack hash, fail-closed parser, current candidate lineage, and promotion
+gate are documented in
+[docs/SIGNAL-HYPOTHESIS-RESEARCH-SURFACE.md](docs/SIGNAL-HYPOTHESIS-RESEARCH-SURFACE.md).
 The device-free production-path replay controls, fault matrix, and hardware boundary are documented
 in [docs/REAL-CAN-OFFLINE-REPLAY.md](docs/REAL-CAN-OFFLINE-REPLAY.md).
 The harsher 15-scenario communication matrix, exact budgets, UI result semantics, recovery-loop
