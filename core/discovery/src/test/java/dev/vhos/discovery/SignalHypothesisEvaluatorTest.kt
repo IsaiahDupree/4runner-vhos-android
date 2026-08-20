@@ -15,7 +15,7 @@ class SignalHypothesisEvaluatorTest {
         val report = SignalHypothesisEvaluator.evaluate(records, pack)
 
         assertEquals("toyota.4runner.2005.passive-can-hypotheses", report.packId)
-        assertEquals("0.3.0", report.packVersion)
+        assertEquals("0.4.0", report.packVersion)
         assertEquals(SignalHypothesisCatalog.BUNDLED_SHA256, report.packSha256)
         assertEquals(11, pack.hypothesisCount)
         assertEquals("DISCOVERY_ONLY", report.status)

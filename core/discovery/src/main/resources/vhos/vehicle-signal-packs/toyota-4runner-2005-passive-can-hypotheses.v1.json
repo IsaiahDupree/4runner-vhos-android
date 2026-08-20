@@ -2,7 +2,7 @@
   "contract": "can.signal-hypothesis-pack",
   "contract_version": "1.0.0",
   "pack_id": "toyota.4runner.2005.passive-can-hypotheses",
-  "pack_version": "0.3.0",
+  "pack_version": "0.4.0",
   "target": {
     "make": "Toyota",
     "model": "4Runner",
@@ -27,6 +27,15 @@
       "revision": null,
       "scope": "Independent physical-measurement correlation of an 11-bit, 500 kbit/s CAN network on a 2010 Toyota Camry.",
       "limitations": "The vehicle, ECUs, calibration, options, and model year differ from the target 2005 4Runner. Its identifiers and fields are discovery clues only."
+    },
+    {
+      "source_id": "sae-ruth-bartlett-daily-camry-2012",
+      "authority_level": "B",
+      "publisher": "SAE International / Ruth, Bartlett, and Daily",
+      "url": "https://doi.org/10.4271/2012-01-0999",
+      "revision": "2012-01-0999",
+      "scope": "Peer-reviewed synchronized testing of 2010 and 2011 Toyota Camry data. The study identifies 0x2C1 accelerator-pedal traffic and 0x2C4 engine-speed traffic on an 11-bit, 500 kbit/s network and reports their update behavior.",
+      "limitations": "The study covers one Camry family rather than the target 2005 4Runner. It does not establish the target byte layout, scaling, ECU calibration, or applicability."
     },
     {
       "source_id": "realdash-fj-cruiser-cedfdf49",
@@ -134,6 +143,7 @@
       ],
       "source_ids": [
         "csu-toyota-can-2010-camry",
+        "sae-ruth-bartlett-daily-camry-2012",
         "realdash-fj-cruiser-cedfdf49",
         "aim-community-dbc-6e2f88f",
         "aim-community-auris-6e2f88f",
@@ -220,6 +230,7 @@
       ],
       "source_ids": [
         "csu-toyota-can-2010-camry",
+        "sae-ruth-bartlett-daily-camry-2012",
         "realdash-fj-cruiser-cedfdf49",
         "nfi-lexus-is250-evu-2016"
       ],

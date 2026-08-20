@@ -18,7 +18,7 @@ It does not diagnose the 4Runner and does not create a Vehicle Signal Pack.
 ## Separate source-pinned research surface
 
 After raw discovery succeeds, Android evaluates the same immutable observations against the exact
-SHA-pinned `toyota.4runner.2005.passive-can-hypotheses@0.3.0` research pack. That second card is
+SHA-pinned `toyota.4runner.2005.passive-can-hypotheses@0.4.0` research pack. That second card is
 visibly labeled **UNVERIFIED CROSS-MODEL HYPOTHESIS** and **ENGINEERING_RESEARCH ONLY**. It can show
 candidate raw fields, the output range of source-pinned cross-model transforms, contradictory
 layouts, and the first required independent validation.

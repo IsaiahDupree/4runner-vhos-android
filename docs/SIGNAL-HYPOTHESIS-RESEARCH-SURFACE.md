@@ -29,10 +29,10 @@ core/discovery/src/main/resources/vhos/vehicle-signal-packs/
 | Field | Value |
 | --- | --- |
 | Pack ID | `toyota.4runner.2005.passive-can-hypotheses` |
-| Pack version | `0.3.0` |
+| Pack version | `0.4.0` |
 | Contract | `can.signal-hypothesis-pack@1.0.0` |
-| SHA-256 | `cd1467986138a11c8554d15252ffe8586ae48fdc8d507acbb846ae2fac204c7b` |
-| Product source commit | `767551a` |
+| SHA-256 | `6e2df8207e8977d613923a01f4bea7a16baba74a1869cce2ad0a83b56cf6ba32` |
+| Product source commit | `60282e6` |
 | Authority | `DISCOVERY_ONLY` |
 | Accepted signal definitions | `0` |
 
@@ -76,6 +76,11 @@ if this separate research-pack evaluation fails.
 The source pack retains the exact primary research, version-pinned code artifacts, community leads,
 limitations, conflicting definitions, and required validation for every row. Android displays the
 lineage-derived gate instead of hiding disagreement.
+
+Pack `0.4.0` adds the peer-reviewed SAE 2012-01-0999 Camry study as independent primary evidence
+for the `0x2C1` accelerator-pedal and `0x2C4` engine-speed message families and their observed update
+periods. That raises experiment priority without changing the cross-model authority boundary or
+accepting either target-vehicle scale.
 
 ## Promotion gate
 

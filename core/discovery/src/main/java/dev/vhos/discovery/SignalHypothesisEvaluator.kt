@@ -68,7 +68,7 @@ object SignalHypothesisCatalog {
     const val BUNDLED_RESOURCE =
         "vhos/vehicle-signal-packs/toyota-4runner-2005-passive-can-hypotheses.v1.json"
     const val BUNDLED_SHA256 =
-        "cd1467986138a11c8554d15252ffe8586ae48fdc8d507acbb846ae2fac204c7b"
+        "6e2df8207e8977d613923a01f4bea7a16baba74a1869cce2ad0a83b56cf6ba32"
 
     private val gson = GsonBuilder()
         .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
