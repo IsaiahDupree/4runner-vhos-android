@@ -60,6 +60,8 @@ class SignalHypothesisPack internal constructor(
     val packVersion: String get() = document.packVersion
     val hypothesisCount: Int get() = document.hypotheses.size
     val acceptedSignalDefinitions: Int get() = document.authority.acceptedSignalDefinitions
+    internal val primaryResearchSourceIds: Set<String>
+        get() = document.sources.filter { it.authorityLevel == "B" }.map { it.sourceId }.toSet()
 }
 
 object SignalHypothesisCatalog {
@@ -338,7 +340,10 @@ internal data class PackAuthority(
     val statement: String = "",
 )
 
-internal data class PackSource(val sourceId: String = "")
+internal data class PackSource(
+    val sourceId: String = "",
+    val authorityLevel: String = "",
+)
 
 internal data class PackHypothesis(
     val hypothesisId: String = "",

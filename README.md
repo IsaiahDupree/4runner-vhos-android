@@ -7,11 +7,13 @@
 Current public development build: **0.1.0-dev.6** (`app-debug.apk`, 2,697,891 bytes). The link above
 downloads the installer directly and does not require a GitHub account.
 
-Current source candidate: **0.1.0-dev.11**. It adds a SHA-pinned, fail-closed Toyota signal
-hypothesis research surface on top of the dev10 real-evidence link-reliability lab and richer raw
-CAN discovery display. Cross-model transforms are visibly unverified, zero definitions are accepted,
-and no candidate can update owner health or the digital twin. It is not the public installer until
-its release artifact and catalog entry are signed and published.
+Current source candidate: **0.1.0-dev.12**. It adds an evidence-ranked validation-mission planner to
+the SHA-pinned, fail-closed Toyota signal hypothesis surface. The planner uses retained target
+activity, research lineage, checksum candidates, and raw-field relationships to say what to validate
+next while explicitly keeping priority separate from confidence. Cross-model transforms remain
+unverified, zero definitions are accepted, and no candidate can update owner health or the digital
+twin. It is not the public installer until its release artifact and catalog entry are signed and
+published.
 
 While the vehicle is parked:
 
@@ -52,6 +54,8 @@ The first vertical slice provides:
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
 - a SHA-pinned **UNVERIFIED CROSS-MODEL HYPOTHESIS** research surface that evaluates retained
   listen-only bytes while keeping production display, automatic promotion, and digital-twin writes blocked;
+- a ranked **NEXT VALIDATION MISSIONS** surface that converts real target activity and source
+  lineage into the next controlled experiment without treating research priority as signal confidence;
 - a read-only **HISTORICAL REPLAY • NOT LIVE** surface that replays persisted real CAN evidence
   through the production envelope/stream/CAN decoders at source time or full-speed ×20 load;
 - self-resynchronizing frame decoding with explicit corruption, discarded-byte, and recovery

@@ -45,6 +45,8 @@ import dev.vhos.discovery.LinkReliabilityMatrixReport
 import dev.vhos.discovery.SignalHypothesisCatalog
 import dev.vhos.discovery.SignalHypothesisEvaluationReport
 import dev.vhos.discovery.SignalHypothesisEvaluator
+import dev.vhos.discovery.SignalResearchBrief
+import dev.vhos.discovery.SignalResearchPlanner
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
 import dev.vhos.model.IndicatorLevel
@@ -633,17 +635,16 @@ class MainActivity : Activity() {
                 val observations = persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
                 val report = CanDiscoveryAnalyzer.analyze(observations)
                 val hypothesisResult = runCatching {
-                    SignalHypothesisEvaluator.evaluate(
-                        observations,
-                        SignalHypothesisCatalog.loadBundled(),
-                    )
+                    val pack = SignalHypothesisCatalog.loadBundled()
+                    val evaluation = SignalHypothesisEvaluator.evaluate(observations, pack)
+                    evaluation to SignalResearchPlanner.plan(report, evaluation, pack)
                 }
                 runOnUiThread {
                     discoveryCard.text = discoveryText(report, total)
                     discoveryCard.setTextColor(levelColor(IndicatorLevel.CHECK))
                     hypothesisResult.fold(
-                        onSuccess = { signalReport ->
-                            hypothesisCard.text = hypothesisText(signalReport)
+                        onSuccess = { (signalReport, researchBrief) ->
+                            hypothesisCard.text = hypothesisText(signalReport, researchBrief)
                             hypothesisCard.setTextColor(levelColor(IndicatorLevel.CHECK))
                         },
                         onFailure = { error ->
@@ -745,7 +746,10 @@ class MainActivity : Activity() {
         append("INTERPRETATION LOCK • RPM, speed, gear, throttle, steering, brake, and health thresholds remain unavailable until an independent reference capture validates exact bytes, scaling, applicability, and lineage.")
     }
 
-    private fun hypothesisText(report: SignalHypothesisEvaluationReport): String = buildString {
+    private fun hypothesisText(
+        report: SignalHypothesisEvaluationReport,
+        research: SignalResearchBrief,
+    ): String = buildString {
         appendLine("SIGNAL RESEARCH  ${report.requiredBadge}")
         appendLine(
             "PACK ${report.packId}@${report.packVersion} • SHA-256 ${report.packSha256.take(12)}…"
@@ -789,6 +793,21 @@ class MainActivity : Activity() {
         }
         if (present.isEmpty()) {
             appendLine("None of the pack's candidate identifiers appears in retained evidence.")
+        }
+        appendLine()
+        appendLine("NEXT VALIDATION MISSIONS — PRIORITY IS NOT CONFIDENCE")
+        research.missions.take(5).forEach { mission ->
+            val semantic = mission.candidateSemantic
+                ?.replace('.', ' ')
+                ?.replace('-', ' ')
+                ?.uppercase(Locale.US)
+                ?: "UNKNOWN SEMANTIC"
+            appendLine(
+                "#${mission.rank} ${mission.identifierHex} $semantic • " +
+                    "priority ${mission.researchPriority}/100 • ${mission.stage}"
+            )
+            mission.reasons.firstOrNull()?.let { appendLine("  why: $it") }
+            appendLine("  next: ${mission.nextValidation}")
         }
         appendLine()
         appendLine("AUTHORITY ${report.allowedSurface} ONLY")
