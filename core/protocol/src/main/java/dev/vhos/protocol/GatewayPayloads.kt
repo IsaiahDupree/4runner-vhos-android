@@ -30,6 +30,7 @@ data class GatewayHealth(
     @SerializedName("bus_off_count") val busOffCount: Long,
     @SerializedName("storage_free_bytes") val storageFreeBytes: Long?,
     @SerializedName("capture_active") val captureActive: Boolean,
+    @SerializedName("capture_session_id") val captureSessionId: Long?,
     @SerializedName("listen_only") val listenOnly: Boolean,
     @SerializedName("can_bitrate_bps") val canBitrateBps: Long?,
     @SerializedName("can_passive_lock") val canPassiveLock: Boolean?,
@@ -118,6 +119,9 @@ object PayloadContracts {
             throw PayloadException("Gateway health vehicle motion is invalid.")
         }
         if (!health.listenOnly) throw PayloadException("Live health no longer proves listen-only operation.")
+        if (health.captureSessionId != null && health.captureSessionId !in 0..UInt.MAX_VALUE.toLong()) {
+            throw PayloadException("Gateway health capture session is outside the deployed uint32 range.")
+        }
         return health
     }
 

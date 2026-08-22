@@ -6,14 +6,17 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.vhos.discovery.AndroidCaptureDraftState
 import dev.vhos.discovery.AndroidCaptureFinalizationAuthority
 import dev.vhos.discovery.AndroidDiscoveryCaptureDraft
+import dev.vhos.discovery.AndroidDiscoveryEvidenceAnchor
 import dev.vhos.discovery.AndroidDiscoveryMarkerKind
 import dev.vhos.discovery.AndroidDiscoveryMarkerRecord
+import dev.vhos.discovery.AndroidDiscoveryMutationAuthority
 import dev.vhos.discovery.AndroidDiscoverySafetyEvidence
 import dev.vhos.discovery.AndroidDiscoverySafetyAuthorization
 import dev.vhos.discovery.AndroidDiscoveryTestLibrary
 import dev.vhos.discovery.AndroidVehicleCapabilityObservation
 import dev.vhos.digitaltwin.VehicleProfile
 import dev.vhos.model.DeviceRole
+import dev.vhos.model.VehicleMotion
 import dev.vhos.protocol.CanObservation
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -44,7 +47,7 @@ class DiscoveryEvidencePersistenceTest {
     @Test
     fun persistsOneActiveCaptureMarkersFinalizationAndCapabilityDeduplication() {
         val store = EvidenceDatabase.open(context)
-        assertEquals(5, store.readableDatabase.version)
+        assertEquals(6, store.readableDatabase.version)
         val scope = seedVehicleAndSource(store, PROFILE_ONE)
         val template = AndroidDiscoveryTestLibrary.requireTemplate(
             "vhos.discovery.brake-pulse",
@@ -77,13 +80,38 @@ class DiscoveryEvidencePersistenceTest {
             finalizationSafetyAuthorization = null,
         ).validate()
 
-        store.beginDiscoveryCapture(active)
         assertThrows(IllegalArgumentException::class.java) {
-            store.beginDiscoveryCapture(active.copy(sessionId = "second-active-draft"))
+            store.beginDiscoveryCaptureAt(
+                active.copy(
+                    safetyAuthorization = authorization.copy(
+                        receivedAtEpochMillis = TEST_NOW_EPOCH_MILLIS - 5_001,
+                    ),
+                ),
+                TEST_NOW_EPOCH_MILLIS,
+            )
         }
-        store.appendDiscoveryMarker(
-            AndroidDiscoveryMarkerRecord(
-                markerId = "android-marker-instrumentation",
+        assertThrows(IllegalArgumentException::class.java) {
+            store.beginDiscoveryCaptureAt(
+                active.copy(
+                    safetyAuthorization = authorization.copy(
+                        receivedAtEpochMillis = TEST_NOW_EPOCH_MILLIS + 1,
+                    ),
+                ),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        store.beginDiscoveryCaptureAt(active, TEST_NOW_EPOCH_MILLIS)
+        assertThrows(IllegalArgumentException::class.java) {
+            store.beginDiscoveryCaptureAt(
+                active.copy(sessionId = "second-active-draft"),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        fun marker(
+            markerId: String,
+            markerAuthorization: AndroidDiscoverySafetyAuthorization = authorization,
+        ) = AndroidDiscoveryMarkerRecord(
+                markerId = markerId,
                 captureSessionId = active.sessionId,
                 eventType = "event.brake.pressed",
                 label = "Brake pressed",
@@ -95,15 +123,28 @@ class DiscoveryEvidencePersistenceTest {
                 evidenceAnchor = null,
                 observer = "owner",
                 note = null,
-                safetyAuthorization = authorization,
+                safetyAuthorization = markerAuthorization,
             ).validate()
+        assertThrows(IllegalArgumentException::class.java) {
+            store.appendDiscoveryMarkerAt(
+                marker(
+                    markerId = "stale-android-marker-instrumentation",
+                    markerAuthorization = authorization.copy(
+                        receivedAtEpochMillis = TEST_NOW_EPOCH_MILLIS - 5_001,
+                    ),
+                ),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        store.appendDiscoveryMarkerAt(
+            marker("android-marker-instrumentation"),
+            TEST_NOW_EPOCH_MILLIS,
         )
 
         assertEquals(active, store.activeDiscoveryCapture()?.session)
         assertEquals(1, store.eventMarkers(active.sessionId).size)
 
-        store.finalizeDiscoveryCapture(
-            active.copy(
+        val completed = active.copy(
                 state = AndroidCaptureDraftState.COMPLETED,
                 endedAt = "2026-08-22T00:00:02Z",
                 endedElapsedRealtimeNanos = 120,
@@ -113,12 +154,25 @@ class DiscoveryEvidencePersistenceTest {
                 finalizationAuthority = AndroidCaptureFinalizationAuthority.PARKED_VERIFIED_COMPLETION,
                 finalizationSafetyAuthorization = authorization.copy(healthFrameSequence = 8UL),
             ).validate()
+        assertThrows(IllegalArgumentException::class.java) {
+            store.finalizeDiscoveryCaptureAt(
+                completed.copy(
+                    finalizationSafetyAuthorization = requireNotNull(
+                        completed.finalizationSafetyAuthorization,
+                    ).copy(receivedAtEpochMillis = TEST_NOW_EPOCH_MILLIS - 5_001),
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        store.finalizeDiscoveryCaptureAt(
+            completed,
+            TEST_NOW_EPOCH_MILLIS,
         )
 
         assertNull(store.activeDiscoveryCapture())
         assertEquals(AndroidCaptureDraftState.COMPLETED, store.recentDiscoveryCaptures().single().session.state)
         assertThrows(IllegalArgumentException::class.java) {
-            store.appendDiscoveryMarker(
+            store.appendDiscoveryMarkerAt(
                 AndroidDiscoveryMarkerRecord(
                     markerId = "marker-after-finalization",
                     captureSessionId = active.sessionId,
@@ -133,7 +187,8 @@ class DiscoveryEvidencePersistenceTest {
                     observer = "owner",
                     note = null,
                     safetyAuthorization = authorization,
-                ).validate()
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
             )
         }
 
@@ -156,12 +211,27 @@ class DiscoveryEvidencePersistenceTest {
             availableStandardSignalIds = emptyList(),
             safetyAuthorization = authorization,
         ).validate()
-        assertTrue(store.persistAndroidVehicleCapabilityObservation(capability))
-        assertFalse(store.persistAndroidVehicleCapabilityObservation(
+        assertThrows(IllegalArgumentException::class.java) {
+            store.persistAndroidVehicleCapabilityObservationAt(
+                capability.copy(
+                    snapshotId = "stale-android-capability-instrumentation",
+                    safetyAuthorization = authorization.copy(
+                        receivedAtEpochMillis = TEST_NOW_EPOCH_MILLIS - 5_001,
+                    ),
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        assertTrue(store.persistAndroidVehicleCapabilityObservationAt(
+            capability,
+            TEST_NOW_EPOCH_MILLIS,
+        ))
+        assertFalse(store.persistAndroidVehicleCapabilityObservationAt(
             capability.copy(
                 snapshotId = "android-capability-instrumentation-2",
                 capturedAt = "2026-08-22T00:00:04Z",
-            )
+            ),
+            TEST_NOW_EPOCH_MILLIS,
         ))
         assertEquals(1, store.recentAndroidVehicleCapabilityObservations().size)
     }
@@ -214,7 +284,7 @@ class DiscoveryEvidencePersistenceTest {
             finalizationAuthority = null,
             finalizationSafetyAuthorization = null,
         ).validate()
-        store.beginDiscoveryCapture(active)
+        store.beginDiscoveryCaptureAt(active, TEST_NOW_EPOCH_MILLIS)
 
         store.appendVehicleProfile(
             VehicleProfile(
@@ -232,7 +302,7 @@ class DiscoveryEvidencePersistenceTest {
         assertEquals(PROFILE_TWO, store.recentCanObservations(secondScope).single().vehicleProfileRevisionId)
 
         assertThrows(IllegalArgumentException::class.java) {
-            store.persistAndroidVehicleCapabilityObservation(
+            store.persistAndroidVehicleCapabilityObservationAt(
                 AndroidVehicleCapabilityObservation(
                     snapshotId = "stale-profile-capability",
                     capturedAt = "2026-08-22T00:01:00Z",
@@ -251,12 +321,13 @@ class DiscoveryEvidencePersistenceTest {
                     supportedObdPidCount = 0,
                     availableStandardSignalIds = emptyList(),
                     safetyAuthorization = authorization,
-                ).validate()
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
             )
         }
 
         assertThrows(IllegalArgumentException::class.java) {
-            store.appendDiscoveryMarker(
+            store.appendDiscoveryMarkerAt(
                 AndroidDiscoveryMarkerRecord(
                     markerId = "wrong-current-scope-marker",
                     captureSessionId = active.sessionId,
@@ -271,11 +342,12 @@ class DiscoveryEvidencePersistenceTest {
                     observer = "owner",
                     note = null,
                     safetyAuthorization = authorization.copy(healthFrameSequence = 8UL),
-                ).validate()
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
             )
         }
         assertThrows(IllegalArgumentException::class.java) {
-            store.finalizeDiscoveryCapture(
+            store.finalizeDiscoveryCaptureAt(
                 active.copy(
                     state = AndroidCaptureDraftState.COMPLETED,
                     endedAt = "2026-08-22T00:01:02Z",
@@ -285,12 +357,13 @@ class DiscoveryEvidencePersistenceTest {
                     endCanObservationCount = 1,
                     finalizationAuthority = AndroidCaptureFinalizationAuthority.PARKED_VERIFIED_COMPLETION,
                     finalizationSafetyAuthorization = authorization.copy(healthFrameSequence = 9UL),
-                ).validate()
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
             )
         }
 
         // A fail-safe abort remains possible after a profile transition so no stale capture is stuck.
-        store.finalizeDiscoveryCapture(
+        store.finalizeDiscoveryCaptureAt(
             active.copy(
                 state = AndroidCaptureDraftState.ABORTED,
                 endedAt = "2026-08-22T00:01:03Z",
@@ -300,8 +373,142 @@ class DiscoveryEvidencePersistenceTest {
                 endCanObservationCount = 1,
                 finalizationAuthority = AndroidCaptureFinalizationAuthority.OWNER_SAFETY_ABORT,
                 finalizationSafetyAuthorization = null,
-            ).validate()
+            ).validate(),
+            TEST_NOW_EPOCH_MILLIS,
         )
+    }
+
+    @Test
+    fun selectorBootstrapPersistsExactLiveCanLineageAndMarkersAreAppendOnly() {
+        val store = EvidenceDatabase.open(context)
+        val scope = seedVehicleAndSource(store, PROFILE_ONE)
+        val firstObservation = canObservation(sessionId = 73u, sequence = 100UL)
+        assertTrue(store.persistCanObservation(scope, firstObservation))
+        val firstAnchor = anchor(firstObservation)
+        val template = AndroidDiscoveryTestLibrary.requireTemplate(
+            AndroidDiscoveryTestLibrary.PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID,
+            AndroidDiscoveryTestLibrary.CONTRACT_VERSION,
+        )
+        val bootstrap = bootstrapAuthorization(firstAnchor)
+        val active = AndroidDiscoveryCaptureDraft(
+            sessionId = "selector-bootstrap-instrumentation",
+            vehicleScopeId = scope.vehicleScopeId,
+            vehicleProfileRevisionId = scope.vehicleProfileRevisionId,
+            sourceId = scope.sourceId,
+            testTemplateId = template.templateId,
+            testTemplateVersion = template.version,
+            testTemplateSnapshot = template,
+            state = AndroidCaptureDraftState.ACTIVE,
+            startedAt = "2026-08-22T00:00:00Z",
+            startedElapsedRealtimeNanos = 100,
+            startedBootId = "boot-instrumentation",
+            endedAt = null,
+            endedElapsedRealtimeNanos = null,
+            endedBootId = null,
+            startAnchor = firstAnchor,
+            endAnchor = null,
+            startLogicalFrameCount = 0,
+            startCanObservationCount = 1,
+            endLogicalFrameCount = null,
+            endCanObservationCount = null,
+            safetyEvidence = AndroidDiscoverySafetyEvidence.PASSIVE_SELECTOR_BOOTSTRAP_UNKNOWN,
+            safetyAuthorization = bootstrap,
+            finalizationAuthority = null,
+            finalizationSafetyAuthorization = null,
+        ).validate()
+        assertThrows(IllegalArgumentException::class.java) {
+            store.beginDiscoveryCaptureAt(
+                active.copy(
+                    sessionId = "selector-bootstrap-stale-raw",
+                    safetyAuthorization = bootstrap.copy(
+                        rawCanReceivedAtEpochMillis = TEST_NOW_EPOCH_MILLIS - 5_001,
+                    ),
+                ).validate(),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        store.beginDiscoveryCaptureAt(active, TEST_NOW_EPOCH_MILLIS)
+
+        fun marker(
+            markerId: String,
+            definitionIndex: Int,
+            evidenceAnchor: AndroidDiscoveryEvidenceAnchor = firstAnchor,
+            markerAuthorization: AndroidDiscoverySafetyAuthorization = bootstrap,
+        ): AndroidDiscoveryMarkerRecord {
+            val definition = template.markers[definitionIndex]
+            return AndroidDiscoveryMarkerRecord(
+                markerId = markerId,
+                captureSessionId = active.sessionId,
+                eventType = definition.eventType,
+                label = definition.label,
+                kind = definition.kind,
+                value = null,
+                unit = null,
+                observedAt = "2026-08-22T00:00:0${definitionIndex + 1}Z",
+                elapsedRealtimeNanos = 110L + definitionIndex,
+                evidenceAnchor = evidenceAnchor,
+                observer = "owner",
+                note = null,
+                safetyAuthorization = markerAuthorization,
+            ).validate()
+        }
+        val firstMarker = marker(
+            markerId = "selector-marker-instrumentation",
+            definitionIndex = 0,
+        )
+        store.appendDiscoveryMarkerAt(firstMarker, TEST_NOW_EPOCH_MILLIS)
+        assertThrows(Exception::class.java) {
+            store.appendDiscoveryMarkerAt(firstMarker, TEST_NOW_EPOCH_MILLIS)
+        }
+
+        val wrongSessionAnchor = firstAnchor.copy(canSessionId = 74u)
+        assertThrows(IllegalArgumentException::class.java) {
+            store.appendDiscoveryMarkerAt(
+                marker(
+                    markerId = "selector-wrong-session",
+                    definitionIndex = 1,
+                    evidenceAnchor = wrongSessionAnchor,
+                    markerAuthorization = bootstrapAuthorization(wrongSessionAnchor),
+                ),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+        template.markers.indices.drop(1).forEach { index ->
+            store.appendDiscoveryMarkerAt(
+                marker("selector-marker-$index", index),
+                TEST_NOW_EPOCH_MILLIS,
+            )
+        }
+
+        val finalObservation = canObservation(sessionId = 73u, sequence = 101UL)
+        assertTrue(store.persistCanObservation(scope, finalObservation))
+        val finalAnchor = anchor(finalObservation)
+        val finalAuthorization = bootstrapAuthorization(finalAnchor).copy(healthFrameSequence = 91UL)
+        store.finalizeDiscoveryCaptureAt(
+            active.copy(
+                state = AndroidCaptureDraftState.COMPLETED,
+                endedAt = "2026-08-22T00:00:02Z",
+                endedElapsedRealtimeNanos = 120,
+                endedBootId = "boot-instrumentation",
+                endAnchor = finalAnchor,
+                endLogicalFrameCount = 0,
+                endCanObservationCount = 2,
+                finalizationAuthority =
+                    AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION,
+                finalizationSafetyAuthorization = finalAuthorization,
+            ).validate(),
+            TEST_NOW_EPOCH_MILLIS,
+        )
+
+        val saved = store.recentDiscoveryCaptures().single().session
+        assertEquals(
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+            saved.safetyAuthorization.mutationAuthority,
+        )
+        assertEquals(73u, saved.safetyAuthorization.captureSessionId)
+        assertEquals(finalAnchor, saved.endAnchor)
+        assertEquals(template.markers.size, store.eventMarkers(saved.sessionId).size)
+        assertTrue(store.eventMarkers(saved.sessionId).all { it.evidenceAnchor == firstAnchor })
     }
 
     private fun seedVehicleAndSource(
@@ -331,9 +538,47 @@ class DiscoveryEvidencePersistenceTest {
         healthFrameSequence = 7UL,
         healthGatewayMonotonicMicroseconds = 7_000UL,
         receivedAtEpochMillis = 1_777_000_000_000L,
+        listenOnlyProven = true,
     )
 
+    private fun canObservation(sessionId: UInt, sequence: ULong) = CanObservation(
+        sessionId = sessionId,
+        sourceSequence = sequence,
+        monotonicMicroseconds = sequence * 1_000UL,
+        bitrateBps = 500_000,
+        identifier = 0x2C4u,
+        extended = false,
+        remoteRequest = false,
+        listenOnly = true,
+        dataLength = 8,
+        data = byteArrayOf(0x15, 0x6C, 0, 0, 0, 0, 0, 0),
+    )
+
+    private fun anchor(observation: CanObservation) = AndroidDiscoveryEvidenceAnchor(
+        sourceId = SOURCE_ID,
+        canSessionId = observation.sessionId,
+        sourceSequence = observation.sourceSequence,
+        gatewayMonotonicMicroseconds = observation.monotonicMicroseconds,
+    ).validate()
+
+    private fun bootstrapAuthorization(rawAnchor: AndroidDiscoveryEvidenceAnchor) =
+        AndroidDiscoverySafetyAuthorization(
+            sourceId = SOURCE_ID,
+            healthFrameSequence = 90UL,
+            healthGatewayMonotonicMicroseconds = 90_000UL,
+            receivedAtEpochMillis = 1_777_000_000_000L,
+            mutationAuthority = AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+            healthVehicleMotion = VehicleMotion.UNKNOWN,
+            captureSessionId = rawAnchor.canSessionId,
+            rawCanAnchor = rawAnchor,
+            rawCanReceivedAtEpochMillis = 1_777_000_000_100L,
+            listenOnlyProven = true,
+            captureActiveProven = true,
+            requiredCapability = AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY,
+        ).validate()
+
     companion object {
+        private const val TEST_NOW_EPOCH_MILLIS = 1_777_000_000_500L
         private const val SOURCE_ID = "gateway-instrumentation"
         private const val PROFILE_ONE = "11111111-1111-4111-8111-111111111111"
         private const val PROFILE_TWO = "22222222-2222-4222-8222-222222222222"

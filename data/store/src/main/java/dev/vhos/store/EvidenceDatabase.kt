@@ -11,11 +11,16 @@ import dev.vhos.discovery.AndroidDiscoveryCaptureDraft
 import dev.vhos.discovery.AndroidCaptureDraftState
 import dev.vhos.discovery.AndroidCaptureFinalizationAuthority
 import dev.vhos.discovery.AndroidDiscoveryEvidenceAnchor
+import dev.vhos.discovery.AndroidDiscoveryMarkerDefinition
 import dev.vhos.discovery.AndroidDiscoveryMarkerKind
 import dev.vhos.discovery.AndroidDiscoverySafetyEvidence
 import dev.vhos.discovery.AndroidDiscoveryMarkerRecord
+import dev.vhos.discovery.AndroidDiscoveryMutationAuthority
+import dev.vhos.discovery.AndroidDiscoveryEngineeringSafetyGate
+import dev.vhos.discovery.AndroidDiscoveryPassiveBootstrapPolicy
 import dev.vhos.discovery.AndroidDiscoverySafetyAuthorization
 import dev.vhos.discovery.AndroidDiscoveryTestTemplate
+import dev.vhos.model.VehicleMotion
 import dev.vhos.discovery.AndroidVehicleCapabilityObservation
 import dev.vhos.digitaltwin.DigitalTwinSnapshot
 import dev.vhos.digitaltwin.HeadUnitInventory
@@ -82,6 +87,72 @@ data class PersistedAndroidDiscoveryCapture(
     val session: AndroidDiscoveryCaptureDraft,
     val eventMarkerCount: Int,
 )
+
+/** String-backed extension keeps unsigned gateway lineage exact across SQLite/Gson boundaries. */
+private data class StoredDiscoveryAuthorizationV1(
+    val schemaVersion: Int,
+    val mutationAuthority: String,
+    val healthVehicleMotion: String,
+    val captureSessionId: String?,
+    val rawCanSourceId: String?,
+    val rawCanSessionId: String?,
+    val rawCanSourceSequence: String?,
+    val rawCanGatewayMonotonicMicroseconds: String?,
+    val rawCanReceivedAtEpochMillis: Long?,
+    val listenOnlyProven: Boolean,
+    val captureActiveProven: Boolean?,
+    val requiredCapability: String?,
+) {
+    fun toAuthorization(base: AndroidDiscoverySafetyAuthorization): AndroidDiscoverySafetyAuthorization {
+        require(schemaVersion == 1) { "Unsupported Discovery authorization extension $schemaVersion." }
+        val rawParts = listOf(
+            rawCanSourceId,
+            rawCanSessionId,
+            rawCanSourceSequence,
+            rawCanGatewayMonotonicMicroseconds,
+        )
+        require(rawParts.all { it == null } || rawParts.all { it != null }) {
+            "Partial live RAW_CAN authorization lineage is invalid."
+        }
+        val rawAnchor = rawCanSourceId?.let {
+            AndroidDiscoveryEvidenceAnchor(
+                sourceId = it,
+                canSessionId = requireNotNull(rawCanSessionId).toUInt(),
+                sourceSequence = requireNotNull(rawCanSourceSequence).toULong(),
+                gatewayMonotonicMicroseconds =
+                    requireNotNull(rawCanGatewayMonotonicMicroseconds).toULong(),
+            ).validate()
+        }
+        return base.copy(
+            mutationAuthority = AndroidDiscoveryMutationAuthority.valueOf(mutationAuthority),
+            healthVehicleMotion = VehicleMotion.valueOf(healthVehicleMotion),
+            captureSessionId = captureSessionId?.toUInt(),
+            rawCanAnchor = rawAnchor,
+            rawCanReceivedAtEpochMillis = rawCanReceivedAtEpochMillis,
+            listenOnlyProven = listenOnlyProven,
+            captureActiveProven = captureActiveProven,
+            requiredCapability = requiredCapability,
+        ).validate()
+    }
+
+    companion object {
+        fun from(value: AndroidDiscoverySafetyAuthorization) = StoredDiscoveryAuthorizationV1(
+            schemaVersion = 1,
+            mutationAuthority = value.mutationAuthority.name,
+            healthVehicleMotion = value.healthVehicleMotion.name,
+            captureSessionId = value.captureSessionId?.toString(),
+            rawCanSourceId = value.rawCanAnchor?.sourceId,
+            rawCanSessionId = value.rawCanAnchor?.canSessionId?.toString(),
+            rawCanSourceSequence = value.rawCanAnchor?.sourceSequence?.toString(),
+            rawCanGatewayMonotonicMicroseconds =
+                value.rawCanAnchor?.gatewayMonotonicMicroseconds?.toString(),
+            rawCanReceivedAtEpochMillis = value.rawCanReceivedAtEpochMillis,
+            listenOnlyProven = value.listenOnlyProven,
+            captureActiveProven = value.captureActiveProven,
+            requiredCapability = value.requiredCapability,
+        )
+    }
+}
 
 class EvidenceDatabase private constructor(
     context: Context,
@@ -215,6 +286,18 @@ class EvidenceDatabase private constructor(
             createDiscoveryTables(database)
             migratedVersion = 5
         }
+        if (migratedVersion == 5) {
+            database.execSQL(
+                "ALTER TABLE discovery_capture_sessions ADD COLUMN safety_authorization_extension_json TEXT"
+            )
+            database.execSQL(
+                "ALTER TABLE discovery_capture_sessions ADD COLUMN finalization_authorization_extension_json TEXT"
+            )
+            database.execSQL(
+                "ALTER TABLE discovery_event_markers ADD COLUMN safety_authorization_extension_json TEXT"
+            )
+            migratedVersion = 6
+        }
         check(migratedVersion == newVersion) {
             "Evidence database migration $oldVersion -> $newVersion is not implemented; destructive migration is forbidden."
         }
@@ -312,7 +395,9 @@ class EvidenceDatabase private constructor(
               finalization_authorization_source_id TEXT,
               finalization_authorization_frame_sequence TEXT,
               finalization_authorization_gateway_monotonic_us TEXT,
-              finalization_authorization_received_at_ms INTEGER
+              finalization_authorization_received_at_ms INTEGER,
+              safety_authorization_extension_json TEXT,
+              finalization_authorization_extension_json TEXT
             )
             """.trimIndent()
         )
@@ -338,6 +423,7 @@ class EvidenceDatabase private constructor(
               safety_authorization_frame_sequence TEXT NOT NULL,
               safety_authorization_gateway_monotonic_us TEXT NOT NULL,
               safety_authorization_received_at_ms INTEGER NOT NULL,
+              safety_authorization_extension_json TEXT,
               FOREIGN KEY(capture_session_id) REFERENCES discovery_capture_sessions(session_id)
             )
             """.trimIndent()
@@ -936,15 +1022,64 @@ class EvidenceDatabase private constructor(
     }
 
     @Synchronized
-    fun beginDiscoveryCapture(session: AndroidDiscoveryCaptureDraft) {
+    fun containsDiscoveryEvidenceAnchor(
+        scope: DiscoveryEvidenceScope,
+        anchor: AndroidDiscoveryEvidenceAnchor,
+    ): Boolean {
+        scope.validate()
+        anchor.validate()
+        require(anchor.sourceId == scope.sourceId)
+        return containsDiscoveryEvidenceAnchor(readableDatabase, scope, anchor)
+    }
+
+    private fun containsDiscoveryEvidenceAnchor(
+        database: SQLiteDatabase,
+        scope: DiscoveryEvidenceScope,
+        anchor: AndroidDiscoveryEvidenceAnchor,
+    ): Boolean = database.query(
+            "can_observations",
+            arrayOf("id"),
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND session_id = ? AND source_sequence = ? AND source_monotonic_us = ?",
+            scope.queryArguments() + arrayOf(
+                anchor.canSessionId.toString(),
+                anchor.sourceSequence.toString(),
+                anchor.gatewayMonotonicMicroseconds.toString(),
+            ),
+            null,
+            null,
+            null,
+            "1",
+        ).use(Cursor::moveToFirst)
+
+    fun beginDiscoveryCapture(session: AndroidDiscoveryCaptureDraft) =
+        beginDiscoveryCaptureAt(session, System.currentTimeMillis())
+
+    /** Deterministic-clock entry point is internal to this module's instrumentation suite. */
+    @Synchronized
+    internal fun beginDiscoveryCaptureAt(
+        session: AndroidDiscoveryCaptureDraft,
+        nowEpochMillis: Long,
+    ) {
         session.validate()
         require(session.state == AndroidCaptureDraftState.ACTIVE) {
             "A newly persisted AndroidDiscoveryCaptureDraft must be ACTIVE."
         }
+        requireFreshDiscoveryAuthorization(session.safetyAuthorization, nowEpochMillis)
         val database = writableDatabase
         database.beginTransaction()
         try {
-            requireCurrentScope(database, session.evidenceScope())
+            val scope = session.evidenceScope()
+            requireCurrentScope(database, scope)
+            if (session.safetyAuthorization.mutationAuthority ==
+                AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+            ) {
+                require(containsDiscoveryEvidenceAnchor(
+                    database,
+                    scope,
+                    requireNotNull(session.startAnchor),
+                )) { "Selector bootstrap start RAW_CAN lineage is not retained." }
+            }
             val activeExists = database.query(
                 "discovery_capture_sessions",
                 arrayOf("session_id"),
@@ -967,11 +1102,24 @@ class EvidenceDatabase private constructor(
         }
     }
 
+    fun finalizeDiscoveryCapture(session: AndroidDiscoveryCaptureDraft) =
+        finalizeDiscoveryCaptureAt(session, System.currentTimeMillis())
+
+    /** Deterministic-clock entry point is internal to this module's instrumentation suite. */
     @Synchronized
-    fun finalizeDiscoveryCapture(session: AndroidDiscoveryCaptureDraft) {
+    internal fun finalizeDiscoveryCaptureAt(
+        session: AndroidDiscoveryCaptureDraft,
+        nowEpochMillis: Long,
+    ) {
         session.validate()
         require(session.state != AndroidCaptureDraftState.ACTIVE) {
             "Final AndroidDiscoveryCaptureDraft state must be COMPLETED or ABORTED."
+        }
+        if (session.state == AndroidCaptureDraftState.COMPLETED) {
+            requireFreshDiscoveryAuthorization(
+                requireNotNull(session.finalizationSafetyAuthorization),
+                nowEpochMillis,
+            )
         }
         val database = writableDatabase
         database.beginTransaction()
@@ -984,6 +1132,18 @@ class EvidenceDatabase private constructor(
             }
             if (session.state == AndroidCaptureDraftState.COMPLETED) {
                 requireCurrentScope(database, stored.evidenceScope())
+                if (session.safetyAuthorization.mutationAuthority ==
+                    AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+                ) {
+                    require(hasExactSelectorBootstrapMarkers(database, stored)) {
+                        "Selector bootstrap cannot complete until its installed marker sequence is exact."
+                    }
+                    require(containsDiscoveryEvidenceAnchor(
+                        database,
+                        stored.evidenceScope(),
+                        requireNotNull(session.endAnchor),
+                    )) { "Selector bootstrap final RAW_CAN lineage is not retained." }
+                }
             }
             require(
                 stored.vehicleScopeId == session.vehicleScopeId &&
@@ -1027,40 +1187,52 @@ class EvidenceDatabase private constructor(
         }
     }
 
+    fun appendDiscoveryMarker(marker: AndroidDiscoveryMarkerRecord) =
+        appendDiscoveryMarkerAt(marker, System.currentTimeMillis())
+
+    /** Deterministic-clock entry point is internal to this module's instrumentation suite. */
     @Synchronized
-    fun appendDiscoveryMarker(marker: AndroidDiscoveryMarkerRecord) {
+    internal fun appendDiscoveryMarkerAt(
+        marker: AndroidDiscoveryMarkerRecord,
+        nowEpochMillis: Long,
+    ) {
         marker.validate()
+        requireFreshDiscoveryAuthorization(marker.safetyAuthorization, nowEpochMillis)
         val database = writableDatabase
         database.beginTransaction()
         try {
-            val state = database.query(
-                "discovery_capture_sessions",
-                arrayOf(
-                    "state", "vehicle_scope_id", "vehicle_profile_revision_id", "capture_source_id"
-                ),
-                "session_id = ?",
-                arrayOf(marker.captureSessionId),
-                null,
-                null,
-                null,
-                "1",
-            ).use { cursor ->
-                require(cursor.moveToFirst()) { "AndroidDiscoveryMarkerRecord AndroidDiscoveryCaptureDraft does not exist." }
-                val draftState = AndroidCaptureDraftState.valueOf(cursor.getString(0))
-                val captureScope = DiscoveryEvidenceScope(
-                    vehicleScopeId = cursor.getString(1),
-                    vehicleProfileRevisionId = cursor.getString(2),
-                    sourceId = cursor.getString(3),
-                ).validate()
-                require(marker.safetyAuthorization.sourceId == captureScope.sourceId) {
-                    "Marker PARKED authorization does not match the capture source."
-                }
-                requireCurrentScope(database, captureScope)
-                draftState
+            val capture = requireNotNull(captureSessionById(database, marker.captureSessionId)) {
+                "AndroidDiscoveryMarkerRecord AndroidDiscoveryCaptureDraft does not exist."
             }
-            require(state == AndroidCaptureDraftState.ACTIVE) {
+            require(capture.state == AndroidCaptureDraftState.ACTIVE) {
                 "AndroidDiscoveryMarkerRecord can only be appended to an active AndroidDiscoveryCaptureDraft."
             }
+            val captureScope = capture.evidenceScope()
+            require(marker.safetyAuthorization.sourceId == captureScope.sourceId &&
+                marker.safetyAuthorization.mutationAuthority ==
+                capture.safetyAuthorization.mutationAuthority
+            ) { "Marker mutation authority does not match the active capture." }
+            if (capture.safetyAuthorization.mutationAuthority ==
+                AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+            ) {
+                require(marker.safetyAuthorization.captureSessionId ==
+                    capture.safetyAuthorization.captureSessionId
+                ) { "Selector marker crossed gateway capture sessions." }
+                require(containsDiscoveryEvidenceAnchor(
+                    database,
+                    captureScope,
+                    requireNotNull(marker.evidenceAnchor),
+                )) { "Selector marker RAW_CAN lineage is not retained." }
+                val markerCount = database.rawQuery(
+                    "SELECT COUNT(*) FROM discovery_event_markers WHERE capture_session_id = ?",
+                    arrayOf(capture.sessionId),
+                ).use { count -> check(count.moveToFirst()); count.getInt(0) }
+                val expected = capture.testTemplateSnapshot.markers.getOrNull(markerCount)
+                require(expected != null && marker.matches(expected)) {
+                    "Selector bootstrap markers must follow the exact installed sequence."
+                }
+            }
+            requireCurrentScope(database, captureScope)
             database.insertOrThrow("discovery_event_markers", null, ContentValues().apply {
                 put("marker_id", marker.markerId)
                 put("capture_session_id", marker.captureSessionId)
@@ -1133,7 +1305,7 @@ class EvidenceDatabase private constructor(
                 "observer", "note", "safety_authorization_source_id",
                 "safety_authorization_frame_sequence",
                 "safety_authorization_gateway_monotonic_us",
-                "safety_authorization_received_at_ms",
+                "safety_authorization_received_at_ms", "safety_authorization_extension_json",
             ),
             "capture_session_id = ?",
             arrayOf(captureSessionId),
@@ -1155,16 +1327,24 @@ class EvidenceDatabase private constructor(
                     evidenceAnchor = cursor.anchor(9, 10, 11, 12),
                     observer = cursor.getString(13),
                     note = cursor.nullableString(14),
-                    safetyAuthorization = cursor.safetyAuthorization(15, 16, 17, 18),
+                    safetyAuthorization = cursor.safetyAuthorization(15, 16, 17, 18, 19),
                 ).validate()
             }
         }
         return result
     }
 
+    fun persistAndroidVehicleCapabilityObservation(snapshot: AndroidVehicleCapabilityObservation): Boolean =
+        persistAndroidVehicleCapabilityObservationAt(snapshot, System.currentTimeMillis())
+
+    /** Deterministic-clock entry point is internal to this module's instrumentation suite. */
     @Synchronized
-    fun persistAndroidVehicleCapabilityObservation(snapshot: AndroidVehicleCapabilityObservation): Boolean {
+    internal fun persistAndroidVehicleCapabilityObservationAt(
+        snapshot: AndroidVehicleCapabilityObservation,
+        nowEpochMillis: Long,
+    ): Boolean {
         snapshot.validate()
+        requireFreshDiscoveryAuthorization(snapshot.safetyAuthorization, nowEpochMillis)
         val scope = DiscoveryEvidenceScope(
             vehicleScopeId = snapshot.vehicleScopeId,
             vehicleProfileRevisionId = snapshot.vehicleProfileRevisionId,
@@ -1203,6 +1383,35 @@ class EvidenceDatabase private constructor(
             return inserted
         } finally {
             database.endTransaction()
+        }
+    }
+
+    /**
+     * The encrypted append boundary independently rechecks receipt freshness. UI checks improve
+     * responsiveness, but they are not persistence authority and cannot make stale lineage valid.
+     */
+    private fun requireFreshDiscoveryAuthorization(
+        authorization: AndroidDiscoverySafetyAuthorization,
+        nowEpochMillis: Long,
+    ) {
+        authorization.validate()
+        val freshnessMillis = when (authorization.mutationAuthority) {
+            AndroidDiscoveryMutationAuthority.PARKED ->
+                AndroidDiscoveryEngineeringSafetyGate.HEALTH_FRESHNESS_MILLIS
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP ->
+                AndroidDiscoveryPassiveBootstrapPolicy.FRESHNESS_MILLIS
+        }
+        require(nowEpochMillis >= 0) { "Discovery mutation clock is invalid." }
+        require(nowEpochMillis - authorization.receivedAtEpochMillis in 0..freshnessMillis) {
+            "Discovery mutation health authorization is stale or future-dated."
+        }
+        if (authorization.mutationAuthority ==
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+        ) {
+            val rawReceipt = requireNotNull(authorization.rawCanReceivedAtEpochMillis)
+            require(nowEpochMillis - rawReceipt in 0..freshnessMillis) {
+                "Selector bootstrap RAW_CAN authorization is stale or future-dated."
+            }
         }
     }
 
@@ -1257,13 +1466,7 @@ class EvidenceDatabase private constructor(
         put("start_logical_frame_count", session.startLogicalFrameCount)
         put("start_can_observation_count", session.startCanObservationCount)
         put("safety_evidence", session.safetyEvidence.name)
-        put("safety_authorization_source_id", session.safetyAuthorization.sourceId)
-        put("safety_authorization_frame_sequence", session.safetyAuthorization.healthFrameSequence.toString())
-        put(
-            "safety_authorization_gateway_monotonic_us",
-            session.safetyAuthorization.healthGatewayMonotonicMicroseconds.toString(),
-        )
-        put("safety_authorization_received_at_ms", session.safetyAuthorization.receivedAtEpochMillis)
+        putSafetyAuthorization(null, session.safetyAuthorization)
     }
 
     private fun AndroidDiscoveryCaptureDraft.evidenceScope(): DiscoveryEvidenceScope =
@@ -1297,6 +1500,37 @@ class EvidenceDatabase private constructor(
         return PersistedAndroidDiscoveryCapture(session, eventCount)
     }
 
+    private fun hasExactSelectorBootstrapMarkers(
+        database: SQLiteDatabase,
+        capture: AndroidDiscoveryCaptureDraft,
+    ): Boolean {
+        val observed = mutableListOf<AndroidDiscoveryMarkerDefinition>()
+        database.query(
+            "discovery_event_markers",
+            arrayOf("event_type", "label", "marker_kind", "unit"),
+            "capture_session_id = ?",
+            arrayOf(capture.sessionId),
+            null,
+            null,
+            "rowid ASC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                observed += AndroidDiscoveryMarkerDefinition(
+                    eventType = cursor.getString(0),
+                    label = cursor.getString(1),
+                    kind = AndroidDiscoveryMarkerKind.valueOf(cursor.getString(2)),
+                    suggestedUnit = cursor.nullableString(3),
+                ).validate()
+            }
+        }
+        return observed == capture.testTemplateSnapshot.markers
+    }
+
+    private fun AndroidDiscoveryMarkerRecord.matches(
+        definition: AndroidDiscoveryMarkerDefinition,
+    ): Boolean = eventType == definition.eventType && label == definition.label &&
+        kind == definition.kind && unit == definition.suggestedUnit
+
     private fun captureSession(cursor: Cursor): AndroidDiscoveryCaptureDraft =
         gson.fromJson(cursor.getString(6), AndroidDiscoveryTestTemplate::class.java).let { template ->
             val templateJson = gson.toJson(template.validate())
@@ -1325,16 +1559,11 @@ class EvidenceDatabase private constructor(
                 endLogicalFrameCount = cursor.nullableLong(25),
                 endCanObservationCount = cursor.nullableLong(26),
                 safetyEvidence = AndroidDiscoverySafetyEvidence.valueOf(cursor.getString(27)),
-                safetyAuthorization = AndroidDiscoverySafetyAuthorization(
-                    sourceId = cursor.getString(28),
-                    healthFrameSequence = cursor.getString(29).toULong(),
-                    healthGatewayMonotonicMicroseconds = cursor.getString(30).toULong(),
-                    receivedAtEpochMillis = cursor.getLong(31),
-                ),
+                safetyAuthorization = cursor.safetyAuthorization(28, 29, 30, 31, 37),
                 finalizationAuthority = cursor.nullableString(32)?.let(
                     AndroidCaptureFinalizationAuthority::valueOf
                 ),
-                finalizationSafetyAuthorization = cursor.nullableSafetyAuthorization(33, 34, 35, 36),
+                finalizationSafetyAuthorization = cursor.nullableSafetyAuthorization(33, 34, 35, 36, 38),
             ).validate()
         }
 
@@ -1343,17 +1572,20 @@ class EvidenceDatabase private constructor(
         authorization: AndroidDiscoverySafetyAuthorization?,
     ) {
         val base = prefix?.let { "${it}_authorization" } ?: "safety_authorization"
+        val extensionColumn = "${base}_extension_json"
         if (authorization == null) {
             putNull("${base}_source_id")
             putNull("${base}_frame_sequence")
             putNull("${base}_gateway_monotonic_us")
             putNull("${base}_received_at_ms")
+            putNull(extensionColumn)
         } else {
             authorization.validate()
             put("${base}_source_id", authorization.sourceId)
             put("${base}_frame_sequence", authorization.healthFrameSequence.toString())
             put("${base}_gateway_monotonic_us", authorization.healthGatewayMonotonicMicroseconds.toString())
             put("${base}_received_at_ms", authorization.receivedAtEpochMillis)
+            put(extensionColumn, gson.toJson(StoredDiscoveryAuthorizationV1.from(authorization)))
         }
     }
 
@@ -1362,25 +1594,37 @@ class EvidenceDatabase private constructor(
         sequenceIndex: Int,
         monotonicIndex: Int,
         receivedAtIndex: Int,
-    ): AndroidDiscoverySafetyAuthorization = AndroidDiscoverySafetyAuthorization(
-        sourceId = getString(sourceIndex),
-        healthFrameSequence = getString(sequenceIndex).toULong(),
-        healthGatewayMonotonicMicroseconds = getString(monotonicIndex).toULong(),
-        receivedAtEpochMillis = getLong(receivedAtIndex),
-    ).validate()
+        extensionIndex: Int,
+    ): AndroidDiscoverySafetyAuthorization {
+        val legacy = AndroidDiscoverySafetyAuthorization(
+            sourceId = getString(sourceIndex),
+            healthFrameSequence = getString(sequenceIndex).toULong(),
+            healthGatewayMonotonicMicroseconds = getString(monotonicIndex).toULong(),
+            receivedAtEpochMillis = getLong(receivedAtIndex),
+            // Pre-v6 rows were written only after a handshake that already rejected non-listen-only
+            // gateways. Preserve that proven invariant without inventing bootstrap lineage.
+            listenOnlyProven = true,
+        )
+        return nullableString(extensionIndex)?.let {
+            gson.fromJson(it, StoredDiscoveryAuthorizationV1::class.java).toAuthorization(legacy)
+        } ?: legacy.validate()
+    }
 
     private fun Cursor.nullableSafetyAuthorization(
         sourceIndex: Int,
         sequenceIndex: Int,
         monotonicIndex: Int,
         receivedAtIndex: Int,
+        extensionIndex: Int,
     ): AndroidDiscoverySafetyAuthorization? = if (isNull(sourceIndex)) {
-        require(isNull(sequenceIndex) && isNull(monotonicIndex) && isNull(receivedAtIndex)) {
+        require(isNull(sequenceIndex) && isNull(monotonicIndex) && isNull(receivedAtIndex) &&
+            isNull(extensionIndex)
+        ) {
             "Partial Discovery PARKED authorization lineage is invalid."
         }
         null
     } else {
-        safetyAuthorization(sourceIndex, sequenceIndex, monotonicIndex, receivedAtIndex)
+        safetyAuthorization(sourceIndex, sequenceIndex, monotonicIndex, receivedAtIndex, extensionIndex)
     }
 
     private fun ContentValues.putAnchor(prefix: String?, anchor: AndroidDiscoveryEvidenceAnchor?) {
@@ -1605,7 +1849,7 @@ class EvidenceDatabase private constructor(
 
     companion object {
         internal const val DATABASE_NAME = "vhos-evidence.db"
-        private const val DATABASE_VERSION = 5
+        private const val DATABASE_VERSION = 6
         private val CAPTURE_SESSION_COLUMNS = arrayOf(
             "session_id", "vehicle_scope_id", "vehicle_profile_revision_id", "capture_source_id",
             "test_template_id", "test_template_version", "test_template_snapshot_json",
@@ -1622,6 +1866,8 @@ class EvidenceDatabase private constructor(
             "finalization_authorization_source_id", "finalization_authorization_frame_sequence",
             "finalization_authorization_gateway_monotonic_us",
             "finalization_authorization_received_at_ms",
+            "safety_authorization_extension_json",
+            "finalization_authorization_extension_json",
         )
         private val INSTANCE_LOCK = Any()
         // SQLiteOpenHelper retains only the application context supplied at construction.

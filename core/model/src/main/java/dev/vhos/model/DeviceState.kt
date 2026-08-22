@@ -69,11 +69,20 @@ data class DeviceSnapshot(
     val busErrors: Long = 0,
     val busOffEvents: Long = 0,
     val listenOnly: Boolean? = null,
+    /** Capabilities from the current validated VHOS handshake; never restored from display state. */
+    val gatewayCapabilities: Set<String> = emptySet(),
     val bitrateBps: Long? = null,
     val vehicleMotion: VehicleMotion = VehicleMotion.UNKNOWN,
     val vehicleMotionObservedAtEpochMs: Long? = null,
     val vehicleMotionFrameSequence: ULong? = null,
     val vehicleMotionGatewayMonotonicMicroseconds: ULong? = null,
+    /** Recorder state and lineage from the newest validated gateway-health frame. */
+    val captureActive: Boolean? = null,
+    val gatewayCaptureSessionId: UInt? = null,
+    /** Exact lineage of the newest validated live RAW_CAN record (never a retained log chunk). */
+    val lastVehicleCanSessionId: UInt? = null,
+    val lastVehicleCanSourceSequence: ULong? = null,
+    val lastVehicleCanGatewayMonotonicMicroseconds: ULong? = null,
     val platformErrorCode: Int? = null,
     val transportErrorName: String? = null,
     val recoveryAttempt: Int = 0,

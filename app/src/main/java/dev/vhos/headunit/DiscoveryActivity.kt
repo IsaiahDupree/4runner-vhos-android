@@ -29,7 +29,10 @@ import dev.vhos.discovery.AndroidDiscoveryMarkerDefinition
 import dev.vhos.discovery.AndroidDiscoveryMarkerKind
 import dev.vhos.discovery.AndroidDiscoveryMarkerRecord
 import dev.vhos.discovery.AndroidDiscoveryLiveEvidence
+import dev.vhos.discovery.AndroidDiscoveryMutationAuthority
+import dev.vhos.discovery.AndroidDiscoveryPassiveBootstrapPolicy
 import dev.vhos.discovery.AndroidDiscoverySafetyEvidence
+import dev.vhos.discovery.AndroidDiscoverySafetyAuthorization
 import dev.vhos.discovery.AndroidDiscoveryTestLibrary
 import dev.vhos.discovery.AndroidDiscoveryTestTemplate
 import dev.vhos.discovery.AndroidVehicleCapabilityObservation
@@ -321,8 +324,8 @@ class DiscoveryActivity : Activity() {
             workspace.loadError != null -> renderFailure(workspace.loadError.orEmpty())
             selectedSection == Section.OVERVIEW -> renderOverview(parked)
             selectedSection == Section.SIGNALS -> renderSignals()
-            selectedSection == Section.TESTS -> renderTests(parked)
-            selectedSection == Section.CAPTURES -> renderCaptures(parked)
+            selectedSection == Section.TESTS -> renderTests()
+            selectedSection == Section.CAPTURES -> renderCaptures()
             selectedSection == Section.CANDIDATES -> renderCandidates()
             selectedSection == Section.REGISTRY -> renderRegistry()
             selectedSection == Section.REPLAY -> renderReplay()
@@ -460,9 +463,10 @@ class DiscoveryActivity : Activity() {
         inspector.text = "PROVENANCE\nStandard values retain ECU, PID, definition revision, sequence, gateway monotonic time, and capture identity.\n\nAUTHORITY\nRaw identifiers and candidate fields remain Engineering-only until independent corroboration and golden replay are complete."
     }
 
-    private fun renderTests(parked: AndroidDiscoveryEngineeringGate) {
+    private fun renderTests() {
         val template = selectedTemplate()
         val active = activeCapture()
+        val mutationGate = mutationGate(template, runtime)
         addTitle("Test Library  ${selectedTemplateIndex + 1}/${AndroidDiscoveryTestLibrary.templates.size}")
         addCard(buildString {
             appendLine(template.title.uppercase(Locale.US))
@@ -489,28 +493,37 @@ class DiscoveryActivity : Activity() {
                 render()
             },
         )
-        val templateAuthorityReady = template.executionAuthority == AndroidDiscoveryExecutionAuthority.PARKED_PASSIVE
-        val canBegin = active == null && parked.allowed && templateAuthorityReady && workspace.scope != null
+        val canBegin = active == null && mutationGate.allowed && workspace.scope != null
         addActions(Action("Begin immutable capture", canBegin) { beginCapture(template) })
         if (!canBegin) {
             addCard(buildString {
                 appendLine("CAPTURE CONTROL LOCKED")
                 when {
                     active != null -> append("A capture is already active.")
-                    !parked.allowed -> append(parked.detail)
+                    !mutationGate.allowed -> append(mutationGate.detail)
                     workspace.scope == null -> append("Vehicle/source scope is unresolved.")
-                    !templateAuthorityReady -> append("This protocol requires ${template.executionAuthority}; that safety workflow is not enabled on this head unit.")
                 }
             }, IndicatorLevel.BLOCKED)
         }
-        inspector.text = "TEST AUTHORITY\nTemplates are versioned product procedures, not evidence that a signal exists.\n\nMOTION RULE\nCapture/test controls remain disabled unless fresh validated gateway health deterministically proves PARKED. Owner assertion and speed=0 are insufficient."
+        inspector.text = if (
+            template.executionAuthority == AndroidDiscoveryExecutionAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+        ) {
+            "EVIDENCE-ONLY BOOTSTRAP\n${mutationGate.detail}\n\n" +
+                "This narrow UNKNOWN-motion workflow only appends P/R/N/D labels to passive CAN evidence. " +
+                "It does not declare PARKED and cannot unlock OTA, diagnostics, capability scans, or any other control."
+        } else {
+            "TEST AUTHORITY\nTemplates are versioned product procedures, not evidence that a signal exists.\n\n" +
+                "MOTION RULE\nNormal capture/test controls remain disabled unless fresh validated gateway health " +
+                "deterministically proves PARKED. Owner assertion and speed=0 are insufficient."
+        }
     }
 
-    private fun renderCaptures(parked: AndroidDiscoveryEngineeringGate) {
+    private fun renderCaptures() {
         addTitle("Capture Sessions")
         val active = activeCapture()
         if (active != null) {
             val template = active.session.testTemplateSnapshot
+            val mutationGate = mutationGate(template, runtime)
             addCard(buildString {
                 appendLine("RECORDING • ${template.title}")
                 appendLine("Android operational draft ${active.session.sessionId}")
@@ -521,17 +534,36 @@ class DiscoveryActivity : Activity() {
                 appendLine("Markers ${workspace.activeMarkers.size}")
                 append("Current store ${workspace.summary?.canObservations ?: 0} observations")
             }, IndicatorLevel.ACTIVE)
-            if (parked.allowed) {
-                template.markers.forEach { marker ->
-                    addActions(Action("MARK • ${marker.label}", true) { addMarker(marker) })
+            if (mutationGate.allowed) {
+                val selectorBootstrap = template.executionAuthority ==
+                    AndroidDiscoveryExecutionAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+                if (selectorBootstrap) {
+                    val next = template.markers.getOrNull(workspace.activeMarkers.size)
+                    if (next != null) {
+                        addCard(
+                            "NEXT REQUIRED MARKER\n${workspace.activeMarkers.size + 1}/${template.markers.size} • ${next.label}",
+                            IndicatorLevel.ACTIVE,
+                        )
+                        addActions(Action("MARK • ${next.label}", true) { addMarker(next) })
+                    } else {
+                        addCard("SELECTOR SEQUENCE COMPLETE\nReview and complete this evidence-only capture.", IndicatorLevel.CHECK)
+                    }
+                } else {
+                    template.markers.forEach { marker ->
+                        addActions(Action("MARK • ${marker.label}", true) { addMarker(marker) })
+                    }
+                    addActions(Action("MARK • Custom observation", true, ::showCustomMarkerDialog))
                 }
-                addActions(Action("MARK • Custom observation", true, ::showCustomMarkerDialog))
+                val completionReady = !selectorBootstrap ||
+                    workspace.activeMarkers.size == template.markers.size
                 addActions(
-                    Action("Complete capture", true) { finalizeCapture(AndroidCaptureDraftState.COMPLETED) },
+                    Action("Complete capture", completionReady) {
+                        finalizeCapture(AndroidCaptureDraftState.COMPLETED)
+                    },
                     Action("Abort capture", true) { finalizeCapture(AndroidCaptureDraftState.ABORTED) },
                 )
             } else {
-                addCard("EVENT CONTROLS LOCKED\n${parked.detail}\nA safety abort remains available because it only terminates recording and cannot promote, complete, or control a vehicle.", IndicatorLevel.BLOCKED)
+                addCard("EVENT CONTROLS LOCKED\n${mutationGate.detail}\nA safety abort remains available because it only terminates recording and cannot promote, complete, or control a vehicle.", IndicatorLevel.BLOCKED)
                 addActions(Action("Safety abort", true) { finalizeCapture(AndroidCaptureDraftState.ABORTED) })
             }
         } else {
@@ -668,35 +700,50 @@ class DiscoveryActivity : Activity() {
     }
 
     private fun beginCapture(template: AndroidDiscoveryTestTemplate) {
-        val parked = authoritativeParkedGate()
-        if (!parked.allowed || template.executionAuthority != AndroidDiscoveryExecutionAuthority.PARKED_PASSIVE) {
-            toast("Capture blocked: ${parked.detail}")
+        val initialGate = authoritativeMutationGate(template)
+        if (!initialGate.allowed) {
+            toast("Capture blocked: ${initialGate.detail}")
             return
         }
         if (workspace.scope == null) return toast("Capture blocked: vehicle/source scope is unresolved.")
         val store = database ?: return toast("Encrypted evidence store is not ready.")
         Thread {
             try {
-                val currentGate = authoritativeParkedGate()
+                val currentGate = authoritativeMutationGate(template)
                 require(currentGate.allowed) {
-                    "Capture blocked because fresh PARKED authority was lost before persistence."
+                    "Capture blocked because current mutation authority was lost before persistence."
                 }
                 val authorization = requireNotNull(currentGate.authorization)
                 val scope = requireNotNull(store.resolveDiscoveryEvidenceScope(authorization.sourceId)) {
                     "Vehicle/source scope is unresolved."
                 }
                 require(scope.sourceId == authorization.sourceId) {
-                    "PARKED authority does not belong to the scoped gateway."
+                    "Mutation authority does not belong to the scoped gateway."
                 }
-                val counts = store.evidenceCounts(scope)
-                val anchor = store.latestDiscoveryEvidenceAnchor(scope)
-                val finalGate = authoritativeParkedGate()
-                require(finalGate.allowed && finalGate.authorization?.sourceId == scope.sourceId) {
-                    "Capture blocked because PARKED authority changed before the database write."
+                val finalGate = authoritativeMutationGate(template)
+                require(finalGate.allowed) {
+                    "Capture blocked because mutation authority changed before the database write."
+                }
+                val finalAuthorization = requireNotNull(finalGate.authorization)
+                require(finalAuthorization.sourceId == scope.sourceId) {
+                    "Capture blocked because mutation authority changed gateway identity."
                 }
                 require(store.resolveDiscoveryEvidenceScope(scope.sourceId) == scope) {
                     "Capture blocked because the vehicle/profile scope changed before persistence."
                 }
+                val anchor = if (
+                    finalAuthorization.mutationAuthority ==
+                    AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+                ) {
+                    requireNotNull(finalAuthorization.rawCanAnchor).also {
+                        require(store.containsDiscoveryEvidenceAnchor(scope, it)) {
+                            "Capture blocked because the authorized live RAW_CAN record is not retained."
+                        }
+                    }
+                } else {
+                    store.latestDiscoveryEvidenceAnchor(scope)
+                }
+                val counts = store.evidenceCounts(scope)
                 store.beginDiscoveryCapture(
                     AndroidDiscoveryCaptureDraft(
                         sessionId = "android-discovery-draft-${UUID.randomUUID()}",
@@ -719,8 +766,8 @@ class DiscoveryActivity : Activity() {
                         startCanObservationCount = counts.canObservations,
                         endLogicalFrameCount = null,
                         endCanObservationCount = null,
-                        safetyEvidence = AndroidDiscoverySafetyEvidence.VALIDATED_GATEWAY_HEALTH_PARKED,
-                        safetyAuthorization = requireNotNull(finalGate.authorization),
+                        safetyEvidence = finalGate.safetyEvidence,
+                        safetyAuthorization = finalAuthorization,
                         finalizationAuthority = null,
                         finalizationSafetyAuthorization = null,
                     ).validate()
@@ -734,23 +781,28 @@ class DiscoveryActivity : Activity() {
     }
 
     private fun addMarker(definition: AndroidDiscoveryMarkerDefinition, value: String? = null, note: String? = null) {
-        val parked = authoritativeParkedGate()
-        if (!parked.allowed) return toast("Marker blocked: ${parked.detail}")
         val store = database ?: return toast("Encrypted evidence store is not ready.")
         val active = activeCapture()?.session ?: return toast("No capture is active.")
+        if (
+            active.safetyAuthorization.mutationAuthority ==
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP &&
+            definition !in active.testTemplateSnapshot.markers
+        ) return toast("Marker blocked: selector bootstrap accepts only its installed P/R/N/D procedure markers.")
+        val initialGate = authoritativeMutationGate(active.testTemplateSnapshot)
+        if (!initialGate.allowed) return toast("Marker blocked: ${initialGate.detail}")
         if (definition.kind == AndroidDiscoveryMarkerKind.MANUAL_MEASUREMENT && value == null) {
             showMeasurementDialog(definition)
             return
         }
         Thread {
             try {
-                val currentGate = authoritativeParkedGate()
+                val currentGate = authoritativeMutationGate(active.testTemplateSnapshot)
                 require(currentGate.allowed) {
-                    "Marker blocked because fresh PARKED authority was lost before persistence."
+                    "Marker blocked because current mutation authority was lost before persistence."
                 }
                 val authorization = requireNotNull(currentGate.authorization)
                 require(authorization.sourceId == active.sourceId) {
-                    "Marker blocked because PARKED authority belongs to a different gateway."
+                    "Marker blocked because mutation authority belongs to a different gateway."
                 }
                 val currentScope = requireNotNull(store.resolveDiscoveryEvidenceScope(active.sourceId)) {
                     "Marker blocked because the current vehicle/source scope is unresolved."
@@ -758,10 +810,30 @@ class DiscoveryActivity : Activity() {
                 require(currentScope == active.evidenceScope()) {
                     "Marker blocked because the active capture belongs to another vehicle/profile revision."
                 }
-                val anchor = store.latestDiscoveryEvidenceAnchor(currentScope)
-                val finalGate = authoritativeParkedGate()
-                require(finalGate.allowed && finalGate.authorization?.sourceId == active.sourceId) {
-                    "Marker blocked because PARKED authority changed before the database write."
+                val finalGate = authoritativeMutationGate(active.testTemplateSnapshot)
+                require(finalGate.allowed) {
+                    "Marker blocked because mutation authority changed before the database write."
+                }
+                val finalAuthorization = requireNotNull(finalGate.authorization)
+                require(finalAuthorization.sourceId == active.sourceId &&
+                    finalAuthorization.mutationAuthority == active.safetyAuthorization.mutationAuthority
+                ) {
+                    "Marker blocked because mutation authority changed type or gateway identity."
+                }
+                val anchor = if (
+                    finalAuthorization.mutationAuthority ==
+                    AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+                ) {
+                    require(finalAuthorization.captureSessionId == active.safetyAuthorization.captureSessionId) {
+                        "Marker blocked because the gateway capture session changed."
+                    }
+                    requireNotNull(finalAuthorization.rawCanAnchor).also {
+                        require(store.containsDiscoveryEvidenceAnchor(currentScope, it)) {
+                            "Marker blocked because the authorized live RAW_CAN record is not retained."
+                        }
+                    }
+                } else {
+                    store.latestDiscoveryEvidenceAnchor(currentScope)
                 }
                 store.appendDiscoveryMarker(
                     AndroidDiscoveryMarkerRecord(
@@ -777,7 +849,7 @@ class DiscoveryActivity : Activity() {
                         evidenceAnchor = anchor,
                         observer = "owner",
                         note = note,
-                        safetyAuthorization = requireNotNull(finalGate.authorization),
+                        safetyAuthorization = finalAuthorization,
                     ).validate()
                 )
                 refreshWorkspace()
@@ -850,19 +922,21 @@ class DiscoveryActivity : Activity() {
         require(state != AndroidCaptureDraftState.ACTIVE)
         val store = database ?: return toast("Encrypted evidence store is not ready.")
         val active = activeCapture()?.session ?: return toast("No capture is active.")
-        if (state == AndroidCaptureDraftState.COMPLETED && !authoritativeParkedGate().allowed) {
-            return toast("Completion blocked because PARKED authority is no longer verified. Abort instead.")
+        if (state == AndroidCaptureDraftState.COMPLETED &&
+            !authoritativeMutationGate(active.testTemplateSnapshot).allowed
+        ) {
+            return toast("Completion blocked because current mutation authority is no longer verified. Abort instead.")
         }
         Thread {
             try {
-                val currentGate = authoritativeParkedGate()
+                val currentGate = authoritativeMutationGate(active.testTemplateSnapshot)
                 val interruptedByReboot = active.startedBootId != bootId
                 if (state == AndroidCaptureDraftState.COMPLETED) {
                     require(!interruptedByReboot && currentGate.allowed) {
-                        "Completion blocked because fresh PARKED authority was lost before persistence."
+                        "Completion blocked because current mutation authority was lost before persistence."
                     }
                     require(currentGate.authorization?.sourceId == active.sourceId) {
-                        "Completion blocked because PARKED authority belongs to a different gateway."
+                        "Completion blocked because mutation authority belongs to a different gateway."
                     }
                 }
                 val activeScope = active.evidenceScope()
@@ -874,15 +948,30 @@ class DiscoveryActivity : Activity() {
                         "Completion blocked because the active capture belongs to another vehicle/profile revision."
                     }
                 }
-                val counts = store.evidenceCounts(activeScope)
-                val endAnchor = store.latestDiscoveryEvidenceAnchor(activeScope)
                 val finalGate = if (state == AndroidCaptureDraftState.COMPLETED) {
-                    authoritativeParkedGate().also { gate ->
+                    authoritativeMutationGate(active.testTemplateSnapshot).also { gate ->
                         require(gate.allowed && gate.authorization?.sourceId == active.sourceId) {
-                            "Completion blocked because PARKED authority changed before the database write."
+                            "Completion blocked because mutation authority changed before the database write."
                         }
                     }
                 } else null
+                val finalAuthorization = finalGate?.authorization
+                val endAnchor = if (
+                    finalAuthorization?.mutationAuthority ==
+                    AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+                ) {
+                    require(finalAuthorization.captureSessionId == active.safetyAuthorization.captureSessionId) {
+                        "Completion blocked because the gateway capture session changed."
+                    }
+                    requireNotNull(finalAuthorization.rawCanAnchor).also {
+                        require(store.containsDiscoveryEvidenceAnchor(activeScope, it)) {
+                            "Completion blocked because the authorized live RAW_CAN record is not retained."
+                        }
+                    }
+                } else {
+                    store.latestDiscoveryEvidenceAnchor(activeScope)
+                }
+                val counts = store.evidenceCounts(activeScope)
                 store.finalizeDiscoveryCapture(
                     active.copy(
                         state = state,
@@ -894,13 +983,17 @@ class DiscoveryActivity : Activity() {
                         endCanObservationCount = counts.canObservations,
                         finalizationAuthority = when {
                             interruptedByReboot -> AndroidCaptureFinalizationAuthority.INTERRUPTED_BY_REBOOT
+                            state == AndroidCaptureDraftState.COMPLETED &&
+                                finalAuthorization?.mutationAuthority ==
+                                AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP ->
+                                AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION
                             state == AndroidCaptureDraftState.COMPLETED ->
                                 AndroidCaptureFinalizationAuthority.PARKED_VERIFIED_COMPLETION
                             else -> AndroidCaptureFinalizationAuthority.OWNER_SAFETY_ABORT
                         },
                         finalizationSafetyAuthorization = if (
                             state == AndroidCaptureDraftState.COMPLETED
-                        ) finalGate?.authorization else null,
+                        ) finalAuthorization else null,
                     ).validate()
                 )
                 refreshWorkspace()
@@ -1044,6 +1137,40 @@ class DiscoveryActivity : Activity() {
     private fun authoritativeParkedGate(): AndroidDiscoveryEngineeringGate =
         parkedGate(HeadUnitRuntime.snapshot())
 
+    private fun mutationGate(
+        template: AndroidDiscoveryTestTemplate,
+        snapshot: HeadUnitSnapshot,
+    ): DiscoveryMutationGate = when (template.executionAuthority) {
+        AndroidDiscoveryExecutionAuthority.PARKED_PASSIVE -> {
+            val parked = parkedGate(snapshot)
+            DiscoveryMutationGate(
+                allowed = parked.allowed,
+                detail = parked.detail,
+                authorization = parked.authorization,
+                safetyEvidence = AndroidDiscoverySafetyEvidence.VALIDATED_GATEWAY_HEALTH_PARKED,
+            )
+        }
+        AndroidDiscoveryExecutionAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP -> {
+            val passive = AndroidDiscoveryPassiveBootstrapPolicy.evaluate(template, snapshot.obd)
+            DiscoveryMutationGate(
+                allowed = passive.allowed,
+                detail = passive.detail,
+                authorization = passive.authorization,
+                safetyEvidence = AndroidDiscoverySafetyEvidence.PASSIVE_SELECTOR_BOOTSTRAP_UNKNOWN,
+            )
+        }
+        else -> DiscoveryMutationGate(
+            allowed = false,
+            detail = "This protocol requires ${template.executionAuthority}; that safety workflow is not enabled on this head unit.",
+            authorization = null,
+            safetyEvidence = AndroidDiscoverySafetyEvidence.VALIDATED_GATEWAY_HEALTH_PARKED,
+        )
+    }
+
+    /** Mutations bypass the conflated UI observer and inspect the newest synchronous state. */
+    private fun authoritativeMutationGate(template: AndroidDiscoveryTestTemplate): DiscoveryMutationGate =
+        mutationGate(template, HeadUnitRuntime.snapshot())
+
     private fun activeCapture(): PersistedAndroidDiscoveryCapture? =
         workspace.activeCapture
 
@@ -1129,11 +1256,6 @@ class DiscoveryActivity : Activity() {
             snapshot.obd.lastFrameAtEpochMs?.let {
                 System.currentTimeMillis() - it in 0..LIVE_FRESHNESS_MS
             } == true
-
-    private fun hasFreshGatewayHealth(snapshot: HeadUnitSnapshot): Boolean =
-        snapshot.obd.vehicleMotionObservedAtEpochMs?.let {
-            System.currentTimeMillis() - it in 0..LIVE_FRESHNESS_MS
-        } == true
 
     private fun currentStandardObdReadings(snapshot: HeadUnitSnapshot) =
         if (hasFreshStreamingContract(snapshot) && snapshot.obd.sourceId == workspace.scope?.sourceId) {
@@ -1226,6 +1348,12 @@ class DiscoveryActivity : Activity() {
     }
 
     private data class Action(val label: String, val enabled: Boolean, val action: () -> Unit)
+    private data class DiscoveryMutationGate(
+        val allowed: Boolean,
+        val detail: String,
+        val authorization: AndroidDiscoverySafetyAuthorization?,
+        val safetyEvidence: AndroidDiscoverySafetyEvidence,
+    )
     private data class CandidateResult(val items: List<AndroidCandidateResearchItem>, val error: String?)
     private data class WorkspaceData(
         val loading: Boolean,

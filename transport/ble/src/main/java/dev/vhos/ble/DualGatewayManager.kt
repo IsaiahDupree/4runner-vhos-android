@@ -548,7 +548,7 @@ private class GatewayGattConnection(
     private var logicalFrames = 0L
     private var persistedFrames = 0L
     private var vehicleFrames = 0L
-    private var lastVehicleFrameAtEpochMs: Long? = null
+    private var captureLineage = GatewayCaptureLineage()
     private var crcFailures = 0L
     private var protocolFailures = 0L
     private var busErrors = 0L
@@ -907,11 +907,12 @@ private class GatewayGattConnection(
                     if (inserted && frame.messageType == MessageType.RAW_CAN_FRAME) vehicleFrames++
                     bitrateBps = observation.bitrateBps.toLong()
                 }
-                if (frame.messageType == MessageType.RAW_CAN_FRAME && observations.isNotEmpty()) {
-                    // This is receipt freshness, independent of the gateway's cumulative boot counter.
-                    // Historical CAPTURE_LOG_CHUNK traffic must never make the live bus appear current.
-                    lastVehicleFrameAtEpochMs = System.currentTimeMillis()
-                }
+                captureLineage = GatewayCaptureLineageReducer.acceptCan(
+                    current = captureLineage,
+                    messageType = frame.messageType,
+                    observations = observations,
+                    receivedAtEpochMillis = System.currentTimeMillis(),
+                )
             }
             MessageType.GATEWAY_HEALTH -> {
                 val health = try {
@@ -928,6 +929,7 @@ private class GatewayGattConnection(
                 vehicleMotionObservedAtEpochMs = System.currentTimeMillis()
                 vehicleMotionFrameSequence = frame.sequence
                 vehicleMotionGatewayMonotonicMicroseconds = frame.monotonicMicroseconds
+                captureLineage = GatewayCaptureLineageReducer.acceptHealth(captureLineage, health)
             }
             MessageType.DIAGNOSTIC_RESPONSE -> {
                 val response = try {
@@ -1013,15 +1015,22 @@ private class GatewayGattConnection(
                 protocolFailures = protocolFailures,
                 reconnects = reconnectCount,
                 vehicleFrames = vehicleFrames,
-                lastVehicleFrameAtEpochMs = lastVehicleFrameAtEpochMs,
+                lastVehicleFrameAtEpochMs = captureLineage.lastVehicleFrameAtEpochMillis,
                 busErrors = busErrors,
                 busOffEvents = busOffEvents,
                 listenOnly = source?.listenOnly,
+                gatewayCapabilities = source?.capabilities.orEmpty(),
                 bitrateBps = bitrateBps,
                 vehicleMotion = vehicleMotion,
                 vehicleMotionObservedAtEpochMs = vehicleMotionObservedAtEpochMs,
                 vehicleMotionFrameSequence = vehicleMotionFrameSequence,
                 vehicleMotionGatewayMonotonicMicroseconds = vehicleMotionGatewayMonotonicMicroseconds,
+                captureActive = captureLineage.captureActive,
+                gatewayCaptureSessionId = captureLineage.gatewayCaptureSessionId,
+                lastVehicleCanSessionId = captureLineage.lastVehicleCanSessionId,
+                lastVehicleCanSourceSequence = captureLineage.lastVehicleCanSourceSequence,
+                lastVehicleCanGatewayMonotonicMicroseconds =
+                    captureLineage.lastVehicleCanGatewayMonotonicMicroseconds,
                 j1979EcuCount = availability.size,
                 j1979EnumerationComplete = availability.takeIf { it.isNotEmpty() }
                     ?.all { it.enumerationComplete },

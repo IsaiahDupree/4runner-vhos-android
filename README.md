@@ -10,7 +10,7 @@ downloads the installer directly and does not require a GitHub account.
 
 This release adds a landscape Discovery Engineering workspace
 backed by current validated gateway state and the encrypted evidence store: vehicle/source-scoped overview, supported
-standard values, 15 versioned test procedures, durable capture drafts and event markers, candidate
+standard values, 16 versioned test procedures, durable capture drafts and event markers, candidate
 review, a closed promotion registry, evidence progress, and production-path replay. Capture, marker,
 test, capability-save, and normal completion controls require a fresh validated gateway-health
 `PARKED` report and retain the exact authorizing health-frame lineage;
@@ -18,6 +18,9 @@ each mutation re-reads the latest synchronous runtime state rather than trusting
 and live bus status requires a fresh validated `RAW_CAN_FRAME` receipt rather than a cumulative counter;
 unknown, moving, stale, and degraded states fail closed. Android operational records remain
 explicitly separate from the portable iPhone contracts until a checksummed archive mapping exists.
+One exact evidence-only selector bootstrap can run while motion remains honestly `UNKNOWN`, but only
+with fresh matching gateway-health/live-RAW-CAN capture lineage, active listen-only capture, and the
+current `capture.passive` capability; it cannot grant PARKED authority or unlock any other control.
 
 While the vehicle is parked:
 
@@ -66,6 +69,9 @@ The first vertical slice provides:
 - a centralized engineering safety gate that requires a current validated gateway-health `PARKED`
   report, retains its source/sequence/monotonic lineage, and rejects unknown, moving, stale, future,
   degraded, speed-zero, and owner-asserted states;
+- one exact `UNKNOWN`-only **Park / Selector Bootstrap** that appends P/R/N/D labels to current
+  passive evidence only after gateway identity, capability, recorder state, capture session,
+  health freshness, live raw-CAN freshness, and retained raw-anchor lineage all match;
 - a read-only **HISTORICAL REPLAY • NOT LIVE** surface that replays persisted real CAN evidence
   through the production envelope/stream/CAN decoders at source time or full-speed ×20 load;
 - self-resynchronizing frame decoding with explicit corruption, discarded-byte, and recovery
@@ -81,7 +87,7 @@ The first vertical slice provides:
   timing-belt applicability guard;
 - a 22-system whole-vehicle health map that begins entirely `UNKNOWN / UNKNOWN` and requires
   immutable evidence before showing any health state;
-- non-destructive SQLCipher schema migrations through v5, including immutable
+- non-destructive SQLCipher schema migrations through v6, including immutable
   vehicle/profile/source bindings on raw logical/CAN evidence, scoped Android-internal Discovery
   captures/markers/capability observations, fail-closed legacy quarantine, and owner-controlled
   versioned digital-twin JSON export;
@@ -163,3 +169,6 @@ physical-device acceptance gate are documented in
 The first Android Discovery workspace, deterministic PARKED gate, SQLCipher draft/marker lifecycle,
 candidate authority, replay boundary, and portable-contract mapping boundary are documented in
 [docs/DISCOVERY-ENGINEERING-WORKSPACE.md](docs/DISCOVERY-ENGINEERING-WORKSPACE.md).
+The exact UNKNOWN-only Park/selector bootstrap, live capture-lineage gate, persistence extension,
+vehicle procedure, and explicit non-authority boundary are documented in
+[docs/PARK-SELECTOR-BOOTSTRAP.md](docs/PARK-SELECTOR-BOOTSTRAP.md).

@@ -67,23 +67,29 @@ bounded streaming oracle instead of retaining a second 200,000-record result lis
 
 ## Deterministic PARKED gate
 
-All test, capture, marker, capability-save, and normal-completion controls fail closed unless the
+All normal test, capture, marker, capability-save, and completion controls fail closed unless the
 current validated gateway-health stream reports `PARKED`. Read-only review/replay does not widen
-that authority.
+that authority. The one exact evidence-only Park/selector bootstrap is documented separately in
+[PARK-SELECTOR-BOOTSTRAP.md](PARK-SELECTOR-BOOTSTRAP.md); it never becomes PARKED authority.
 
 `AndroidDiscoveryEngineeringSafetyGate` requires all of the following at the same time:
 
 1. the OBD gateway connection phase is `STREAMING`;
 2. the latest validated `gateway.health` payload says `vehicle_motion=PARKED`;
-3. that motion report is no more than 2 seconds old; and
-4. the overall validated frame stream is no more than 2 seconds old; and
-5. the exact gateway source, health-frame sequence, gateway monotonic time, and local receipt time
+3. the validated gateway handshake proves listen-only operation;
+4. that motion report is no more than 5 seconds old; and
+5. the overall validated frame stream is no more than 5 seconds old; and
+6. the exact gateway source, health-frame sequence, gateway monotonic time, and local receipt time
    are available for durable authorization lineage.
 
 Every mutation re-reads the synchronous `HeadUnitRuntime.snapshot()` immediately before its
 database write. The activity's throttled/conflated render snapshot is display-only; it can never
 authorize a capture, marker, capability observation, or normal completion. A newly received
 `MOVING` or `UNKNOWN` health frame therefore revokes a cached `PARKED` view before the next render.
+The SQLCipher append boundary then performs its own clock check and rejects health or live-raw
+authorization older than five seconds or dated in the future. The UI check is not persistence
+authority. Only internal instrumentation entry points accept an explicit clock for deterministic
+boundary tests.
 
 The gate rejects:
 
@@ -101,7 +107,7 @@ such as `STOPPED` are protocol errors rather than new safety states. `UNKNOWN` i
 
 When PARKED evidence is lost during a capture, new markers and normal completion lock immediately.
 The operator may perform a **safety abort** so the app is never trapped in an active session. Abort
-is the sole mutation exempt from current PARKED authority: it only terminates recording, is stored
+is always exempt from current mutation authority: it only terminates recording, is stored
 as `OWNER_SAFETY_ABORT`, carries no final PARKED authorization, and cannot complete, promote, query,
 or control anything. A draft left active across an Android reboot is automatically closed as
 `INTERRUPTED_BY_REBOOT`; elapsed-realtime values from different boots are never compared as one
@@ -115,27 +121,29 @@ if gateway-health notifications remain fresh.
 
 ## Versioned test library
 
-`AndroidDiscoveryTestLibrary` contains 15 versioned templates:
+`AndroidDiscoveryTestLibrary` contains 16 versioned templates:
 
-1. ignition cycle;
-2. cold start;
-3. RPM sweep;
-4. accelerator sweep;
-5. brake pulse;
-6. steering sweep;
-7. wheel rotation;
-8. A/C on/off;
-9. blower sweep;
-10. HVAC temperature sweep;
-11. four-wheel-drive transition;
-12. suspension settle;
-13. tire-pressure change;
-14. electrical load; and
-15. controlled road test.
+1. Park / selector bootstrap;
+2. ignition cycle;
+3. cold start;
+4. RPM sweep;
+5. accelerator sweep;
+6. brake pulse;
+7. steering sweep;
+8. wheel rotation;
+9. A/C on/off;
+10. blower sweep;
+11. HVAC temperature sweep;
+12. four-wheel-drive transition;
+13. suspension settle;
+14. tire-pressure change;
+15. electrical load; and
+16. controlled road test.
 
 Each template has a stable ID, semantic version, category, purpose, safety classification,
-step-by-step procedure, and a finite marker vocabulary. Only `PARKED_PASSIVE` templates can start
-on this head-unit build. Passenger-supervised driving and specialist-setup templates remain visible
+step-by-step procedure, and a finite marker vocabulary. `PARKED_PASSIVE` templates and the one exact
+UNKNOWN-only passive selector bootstrap can start on this head-unit build. Passenger-supervised
+driving and specialist-setup templates remain visible
 as planned protocols but are explicitly locked because their separate safety workflows do not yet
 exist.
 
@@ -144,8 +152,8 @@ assert that a proposed signal or decoder is correct.
 
 ## Android operational persistence
 
-SQLCipher schema version 5 adds immutable vehicle lineage to the raw evidence layer and retains the
-version-4 Discovery lifecycle:
+SQLCipher schema version 6 retains immutable vehicle lineage and extends the Discovery lifecycle
+with versioned mutation-authorization data:
 
 ### `logical_frames` and `can_observations`
 
@@ -158,10 +166,12 @@ portable export must supply all three values; there is no source-only fallback.
 ### `discovery_capture_sessions`
 
 An append/finalize lifecycle for one active Android draft. The vehicle/profile/source scope, full
-immutable test-template snapshot and SHA-256, boot identity, exact PARKED health-frame authority,
+immutable test-template snapshot and SHA-256, boot identity, exact mutation health-frame authority,
 start clocks, and evidence cursors are immutable after insertion. Finalization can only
 change `ACTIVE` to `COMPLETED` or `ABORTED` and must supply monotonic end clocks and nondecreasing
-source-scoped evidence counts. Normal completion stores a second, current PARKED authorization.
+source-scoped evidence counts. Normal completion stores a second, current PARKED authorization;
+selector-bootstrap completion stores fresh UNKNOWN/passive health and exact live-RAW-CAN lineage
+from the same gateway capture session.
 A partial unique index prevents two active captures.
 
 ### `discovery_event_markers`
@@ -175,7 +185,8 @@ Append-only operator observations and independent measurements. A marker contain
 - wall-clock and Android elapsed-realtime clocks;
 - observer and optional note; and
 - the nearest retained gateway capture/session/sequence/monotonic anchor when available; and
-- the exact fresh PARKED gateway-health frame that authorized the append.
+- the exact fresh mutation authority that authorized the append; selector-bootstrap markers also
+  require the retained live raw-CAN anchor from that same authorization and capture session.
 
 Markers can only be appended to an active capture whose vehicle/profile/source identity still equals
 the current vehicle binding. Measurements require a finite number in the UI
@@ -196,6 +207,12 @@ tables. Schema-v4 raw frames and CAN observations had only a physical `source_id
 preserves those rows in `_v4_unscoped` tables and preserves their dependent Discovery rows in
 `_v4_unbound_evidence` tables. None of those quarantined rows are returned by production Discovery
 queries. No migration guesses which vehicle produced legacy bytes.
+Schema 5 -> 6 adds nullable, versioned authorization-extension JSON to capture starts,
+finalizations, and markers. Existing PARKED rows keep their first-class health lineage and decode
+with strict PARKED/listen-only defaults; the release gate still requires running an encrypted v5
+fixture through SQLCipher on Android before promotion.
+Schema 5 -> 6 only adds nullable, versioned authorization-extension columns. Existing PARKED records
+retain their original meaning; no prior row is upgraded to selector-bootstrap authority.
 
 ## Clock and evidence lineage
 
@@ -296,6 +313,12 @@ Automated coverage includes:
 - immutable raw vehicle/profile/source bindings and cross-profile read isolation;
 - marker and successful-completion rejection after a vehicle/profile scope transition;
 - stale, moving, unknown, future, degraded, and fresh-PARKED safety cases;
+- exact-template UNKNOWN-only selector-bootstrap freshness, capability, recorder, gateway/session,
+  and live-RAW-CAN lineage failures;
+- persistence-boundary stale/future authorization rejection;
+- transport reduction proving live `RAW_CAN_FRAME` updates current lineage while retained capture
+  chunks cannot, and a new connection begins empty;
+- SQLCipher round-trip preservation and append-only selector-marker identity;
 - strict gateway-health motion decoding;
 - candidate priority/confidence separation; and
 - promotion remaining closed without the complete evidence checklist.
@@ -313,9 +336,10 @@ export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
 This source milestone still needs physical acceptance on the Android 13 head unit:
 
 1. install the generated APK without replacing owner evidence;
-2. validate SQLCipher schema 3 -> 4 and 4 -> 5 quarantine migrations on a copy of the field database;
+2. validate SQLCipher schema 3 -> 4, 4 -> 5 quarantine, and 5 -> 6 additive migrations on a copy of the field database;
 3. prove the gateway publishes fresh `PARKED`, `MOVING`, and `UNKNOWN` health transitions;
-4. confirm every mutating button locks within 2 seconds of stale/moving health;
+4. confirm normal mutating buttons lock within 5 seconds of stale/moving health and the selector
+   bootstrap locks immediately on session/capability/capture-lineage mismatch;
 5. complete and abort real parked-passive drafts, then inspect event/evidence alignment;
 6. perform a process death and power-cycle while a draft is active;
 7. replay a completed capture at 1× and ×20 and compare exact payload/order results; and

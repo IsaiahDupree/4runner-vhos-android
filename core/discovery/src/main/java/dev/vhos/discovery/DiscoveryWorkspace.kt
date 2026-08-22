@@ -25,6 +25,8 @@ enum class AndroidDiscoveryTestCategory(val displayName: String) {
 
 enum class AndroidDiscoveryExecutionAuthority {
     PARKED_PASSIVE,
+    /** Evidence-only exception; this is deliberately not PARKED authority. */
+    PASSIVE_PARK_SELECTOR_BOOTSTRAP,
     PASSENGER_SUPERVISED_DRIVE,
     SPECIALIST_SETUP,
 }
@@ -33,6 +35,10 @@ enum class AndroidDiscoveryMarkerKind {
     STATE,
     MANUAL_MEASUREMENT,
     OBSERVATION,
+    SELECTOR_PARK,
+    SELECTOR_REVERSE,
+    SELECTOR_NEUTRAL,
+    SELECTOR_DRIVE,
 }
 
 data class AndroidDiscoveryMarkerDefinition(
@@ -68,7 +74,10 @@ data class AndroidDiscoveryTestTemplate(
     val markers: List<AndroidDiscoveryMarkerDefinition>,
 ) {
     fun validate(): AndroidDiscoveryTestTemplate = apply {
-        require(templateId.startsWith("vhos.discovery.")) { "Discovery template ID is not canonical." }
+        require(
+            templateId.startsWith("vhos.discovery.") ||
+                templateId == AndroidDiscoveryTestLibrary.PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID
+        ) { "Discovery template ID is not canonical." }
         require(VERSION.matches(version)) { "Discovery template version is invalid." }
         require(title.isNotBlank() && purpose.isNotBlank()) { "Discovery template text is incomplete." }
         require(instructions.isNotEmpty() && instructions.none(String::isBlank)) {
@@ -88,8 +97,35 @@ data class AndroidDiscoveryTestTemplate(
 
 object AndroidDiscoveryTestLibrary {
     const val CONTRACT_VERSION = "1.0.0"
+    const val PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID =
+        "discovery.transmission.selector-bootstrap"
+    const val PASSIVE_CAPTURE_CAPABILITY = "capture.passive"
+
+    /** Retained forever so persisted v1 evidence does not depend on the newest catalog version. */
+    private val parkSelectorBootstrapV1 = AndroidDiscoveryTestTemplate(
+        templateId = PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID,
+        version = CONTRACT_VERSION,
+        title = "Park / Selector Bootstrap",
+        category = AndroidDiscoveryTestCategory.TRANSMISSION,
+        purpose = "Collect labeled passive CAN evidence for P, R, N, and D so a deterministic Park signal can be discovered and independently validated.",
+        executionAuthority = AndroidDiscoveryExecutionAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+        instructions = listOf(
+            "Use level ground. Chock the wheels and set the parking brake.",
+            "Keep the engine OFF, turn ignition ON, and hold the foot brake while moving the selector.",
+            "This evidence-only test never declares PARKED and never unlocks OTA or active diagnostics.",
+        ),
+        markers = listOf(
+            observation("transmission.selector.safety_setup", "Confirm wheels chocked, parking brake set, engine OFF, ignition ON"),
+            selector("transmission.selector.park.initial", "Move selector to PARK and hold", AndroidDiscoveryMarkerKind.SELECTOR_PARK),
+            selector("transmission.selector.reverse", "With foot brake held, move selector to REVERSE and hold", AndroidDiscoveryMarkerKind.SELECTOR_REVERSE),
+            selector("transmission.selector.neutral", "Move selector to NEUTRAL and hold", AndroidDiscoveryMarkerKind.SELECTOR_NEUTRAL),
+            selector("transmission.selector.drive", "Move selector to DRIVE and hold", AndroidDiscoveryMarkerKind.SELECTOR_DRIVE),
+            selector("transmission.selector.park.return", "Return selector to PARK and hold", AndroidDiscoveryMarkerKind.SELECTOR_PARK),
+        ),
+    ).validate()
 
     val templates: List<AndroidDiscoveryTestTemplate> = listOf(
+        parkSelectorBootstrapV1,
         template(
             "ignition-cycle", "Ignition cycle", AndroidDiscoveryTestCategory.ELECTRICAL,
             "Separate accessory, ignition-on, crank, running, and shutdown transitions.",
@@ -257,6 +293,12 @@ object AndroidDiscoveryTestLibrary {
 
     private fun measurement(id: String, label: String, unit: String) =
         AndroidDiscoveryMarkerDefinition(id, label, AndroidDiscoveryMarkerKind.MANUAL_MEASUREMENT, unit)
+
+    private fun selector(id: String, label: String, kind: AndroidDiscoveryMarkerKind) =
+        AndroidDiscoveryMarkerDefinition("event.$id", label, kind)
+
+    fun isCanonicalParkSelectorBootstrap(template: AndroidDiscoveryTestTemplate): Boolean =
+        template == parkSelectorBootstrapV1
 }
 
 data class AndroidDiscoveryEvidenceAnchor(
@@ -274,6 +316,12 @@ enum class AndroidCaptureDraftState { ACTIVE, COMPLETED, ABORTED }
 
 enum class AndroidDiscoverySafetyEvidence {
     VALIDATED_GATEWAY_HEALTH_PARKED,
+    PASSIVE_SELECTOR_BOOTSTRAP_UNKNOWN,
+}
+
+enum class AndroidDiscoveryMutationAuthority {
+    PARKED,
+    PASSIVE_PARK_SELECTOR_BOOTSTRAP,
 }
 
 data class AndroidDiscoveryEngineeringGate(
@@ -288,10 +336,125 @@ data class AndroidDiscoverySafetyAuthorization(
     val healthFrameSequence: ULong,
     val healthGatewayMonotonicMicroseconds: ULong,
     val receivedAtEpochMillis: Long,
+    val mutationAuthority: AndroidDiscoveryMutationAuthority = AndroidDiscoveryMutationAuthority.PARKED,
+    val healthVehicleMotion: VehicleMotion = VehicleMotion.PARKED,
+    val captureSessionId: UInt? = null,
+    val rawCanAnchor: AndroidDiscoveryEvidenceAnchor? = null,
+    val rawCanReceivedAtEpochMillis: Long? = null,
+    val listenOnlyProven: Boolean = false,
+    val captureActiveProven: Boolean? = null,
+    val requiredCapability: String? = null,
 ) {
     fun validate(): AndroidDiscoverySafetyAuthorization = apply {
         require(sourceId.isNotBlank()) { "PARKED authorization requires a validated source identity." }
         require(receivedAtEpochMillis >= 0) { "PARKED authorization receipt time is invalid." }
+        when (mutationAuthority) {
+            AndroidDiscoveryMutationAuthority.PARKED -> {
+                require(healthVehicleMotion == VehicleMotion.PARKED)
+                require(listenOnlyProven) {
+                    "PARKED authorization requires current listen-only proof."
+                }
+                require(captureSessionId == null && rawCanAnchor == null &&
+                    rawCanReceivedAtEpochMillis == null && captureActiveProven == null &&
+                    requiredCapability == null
+                ) { "PARKED authorization cannot carry the passive bootstrap exception." }
+            }
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP -> {
+                require(healthVehicleMotion == VehicleMotion.UNKNOWN) {
+                    "Selector bootstrap is valid only while gateway motion authority is UNKNOWN."
+                }
+                val anchor = requireNotNull(rawCanAnchor) {
+                    "Selector bootstrap requires exact live RAW_CAN lineage."
+                }.validate()
+                require(anchor.sourceId == sourceId && anchor.canSessionId == captureSessionId) {
+                    "Selector bootstrap gateway/session lineage does not match."
+                }
+                require(rawCanReceivedAtEpochMillis != null && rawCanReceivedAtEpochMillis >= 0)
+                require(listenOnlyProven && captureActiveProven == true) {
+                    "Selector bootstrap requires active listen-only passive capture."
+                }
+                require(requiredCapability == AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY) {
+                    "Selector bootstrap requires only the passiveCapture capability."
+                }
+            }
+        }
+    }
+}
+
+data class AndroidDiscoveryPassiveBootstrapGate(
+    val allowed: Boolean,
+    val detail: String,
+    val authorization: AndroidDiscoverySafetyAuthorization? = null,
+)
+
+/**
+ * Narrow bootstrap exception used only to append passive selector labels while motion is UNKNOWN.
+ * It cannot be consumed as PARKED authority and is intentionally separate from the parked gate.
+ */
+object AndroidDiscoveryPassiveBootstrapPolicy {
+    const val FRESHNESS_MILLIS = 5_000L
+
+    fun evaluate(
+        template: AndroidDiscoveryTestTemplate,
+        device: DeviceSnapshot,
+        nowEpochMillis: Long = System.currentTimeMillis(),
+    ): AndroidDiscoveryPassiveBootstrapGate {
+        val canonical = runCatching {
+            template.validate()
+            AndroidDiscoveryTestLibrary.isCanonicalParkSelectorBootstrap(template)
+        }.getOrDefault(false)
+        val healthAge = device.vehicleMotionObservedAtEpochMs?.let(nowEpochMillis::minus)
+        val canAge = device.lastVehicleFrameAtEpochMs?.let(nowEpochMillis::minus)
+        val sourceId = device.sourceId
+        val healthSequence = device.vehicleMotionFrameSequence
+        val healthMonotonic = device.vehicleMotionGatewayMonotonicMicroseconds
+        val healthReceipt = device.vehicleMotionObservedAtEpochMs
+        val captureSession = device.gatewayCaptureSessionId
+        val rawSession = device.lastVehicleCanSessionId
+        val rawSequence = device.lastVehicleCanSourceSequence
+        val rawMonotonic = device.lastVehicleCanGatewayMonotonicMicroseconds
+        val rawReceipt = device.lastVehicleFrameAtEpochMs
+        val allowed = canonical &&
+            device.phase == ConnectionPhase.STREAMING &&
+            device.vehicleMotion == VehicleMotion.UNKNOWN &&
+            device.listenOnly == true &&
+            device.captureActive == true &&
+            AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY in device.gatewayCapabilities &&
+            healthAge != null && healthAge in 0..FRESHNESS_MILLIS &&
+            canAge != null && canAge in 0..FRESHNESS_MILLIS &&
+            sourceId != null && healthSequence != null && healthMonotonic != null &&
+            healthReceipt != null && captureSession != null && rawSession == captureSession &&
+            rawSequence != null && rawMonotonic != null && rawReceipt != null
+        val authorization = if (allowed) {
+            AndroidDiscoverySafetyAuthorization(
+                sourceId = requireNotNull(sourceId),
+                healthFrameSequence = requireNotNull(healthSequence),
+                healthGatewayMonotonicMicroseconds = requireNotNull(healthMonotonic),
+                receivedAtEpochMillis = requireNotNull(healthReceipt),
+                mutationAuthority = AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+                healthVehicleMotion = VehicleMotion.UNKNOWN,
+                captureSessionId = requireNotNull(captureSession),
+                rawCanAnchor = AndroidDiscoveryEvidenceAnchor(
+                    sourceId = sourceId,
+                    canSessionId = captureSession,
+                    sourceSequence = requireNotNull(rawSequence),
+                    gatewayMonotonicMicroseconds = requireNotNull(rawMonotonic),
+                ),
+                rawCanReceivedAtEpochMillis = requireNotNull(rawReceipt),
+                listenOnlyProven = true,
+                captureActiveProven = true,
+                requiredCapability = AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY,
+            ).validate()
+        } else null
+        return AndroidDiscoveryPassiveBootstrapGate(
+            allowed = allowed,
+            detail = if (allowed) {
+                "Evidence-only selector bootstrap authorized for capture session $captureSession. This is not PARKED authority."
+            } else {
+                "Selector bootstrap requires the exact installed template, a validated streaming VHOS contract, fresh health and live RAW_CAN from one active listen-only capture session, motion UNKNOWN, and capture.passive."
+            },
+            authorization = authorization,
+        )
     }
 }
 
@@ -301,7 +464,9 @@ data class AndroidDiscoverySafetyAuthorization(
  * retained observation, or stale PARKED state is deliberately insufficient.
  */
 object AndroidDiscoveryEngineeringSafetyGate {
-    const val HEALTH_FRESHNESS_MILLIS = 2_000L
+    // Gateway health is emitted every two seconds. Five seconds preserves fail-closed freshness
+    // while allowing one delayed interval plus normal Android/BLE scheduling jitter.
+    const val HEALTH_FRESHNESS_MILLIS = 5_000L
 
     fun evaluate(
         device: DeviceSnapshot,
@@ -315,19 +480,21 @@ object AndroidDiscoveryEngineeringSafetyGate {
         val motionObservedAt = device.vehicleMotionObservedAtEpochMs
         val authorization = if (
             sourceId != null && motionFrameSequence != null && motionGatewayMonotonic != null &&
-            motionObservedAt != null
+            motionObservedAt != null && device.listenOnly == true
         ) {
             AndroidDiscoverySafetyAuthorization(
                 sourceId = sourceId,
                 healthFrameSequence = motionFrameSequence,
                 healthGatewayMonotonicMicroseconds = motionGatewayMonotonic,
                 receivedAtEpochMillis = motionObservedAt,
+                listenOnlyProven = true,
             ).validate()
         } else {
             null
         }
         val allowed = device.phase == ConnectionPhase.STREAMING &&
             device.vehicleMotion == VehicleMotion.PARKED &&
+            device.listenOnly == true &&
             motionAge != null && motionAge in 0..HEALTH_FRESHNESS_MILLIS &&
             transportAge != null && transportAge in 0..HEALTH_FRESHNESS_MILLIS &&
             authorization != null
@@ -361,6 +528,7 @@ object AndroidDiscoveryLiveEvidence {
 
 enum class AndroidCaptureFinalizationAuthority {
     PARKED_VERIFIED_COMPLETION,
+    PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION,
     OWNER_SAFETY_ABORT,
     INTERRUPTED_BY_REBOOT,
 }
@@ -408,6 +576,23 @@ data class AndroidDiscoveryCaptureDraft(
         require(safetyAuthorization.sourceId == sourceId) {
             "PARKED authorization source does not match the capture source."
         }
+        when (testTemplateSnapshot.executionAuthority) {
+            AndroidDiscoveryExecutionAuthority.PARKED_PASSIVE -> {
+                require(safetyEvidence == AndroidDiscoverySafetyEvidence.VALIDATED_GATEWAY_HEALTH_PARKED &&
+                    safetyAuthorization.mutationAuthority == AndroidDiscoveryMutationAuthority.PARKED
+                ) { "A parked-passive capture requires exact PARKED authority." }
+            }
+            AndroidDiscoveryExecutionAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP -> {
+                require(AndroidDiscoveryTestLibrary.isCanonicalParkSelectorBootstrap(testTemplateSnapshot))
+                require(safetyEvidence == AndroidDiscoverySafetyEvidence.PASSIVE_SELECTOR_BOOTSTRAP_UNKNOWN &&
+                    safetyAuthorization.mutationAuthority == AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+                ) { "Selector bootstrap cannot claim PARKED authority." }
+                require(startAnchor == safetyAuthorization.rawCanAnchor) {
+                    "Selector bootstrap start must bind to its exact live RAW_CAN lineage."
+                }
+            }
+            else -> error("Unsupported Discovery execution authority cannot create an Android capture draft.")
+        }
         require(startLogicalFrameCount >= 0 && startCanObservationCount >= 0) {
             "AndroidDiscoveryCaptureDraft evidence cursors cannot be negative."
         }
@@ -435,11 +620,26 @@ data class AndroidDiscoveryCaptureDraft(
                 endCanObservationCount >= startCanObservationCount
             ) { "AndroidDiscoveryCaptureDraft evidence counts moved backwards." }
             if (state == AndroidCaptureDraftState.COMPLETED) {
-                require(finalizationAuthority == AndroidCaptureFinalizationAuthority.PARKED_VERIFIED_COMPLETION) {
-                    "A completed capture requires current PARKED authority."
+                val expectedFinalAuthority = when (safetyAuthorization.mutationAuthority) {
+                    AndroidDiscoveryMutationAuthority.PARKED ->
+                        AndroidCaptureFinalizationAuthority.PARKED_VERIFIED_COMPLETION
+                    AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP ->
+                        AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION
                 }
-                require(finalizationSafetyAuthorization?.sourceId == sourceId) {
-                    "A completed capture requires exact final PARKED-frame lineage."
+                require(finalizationAuthority == expectedFinalAuthority)
+                val final = requireNotNull(finalizationSafetyAuthorization) {
+                    "A completed capture requires exact final mutation lineage."
+                }.validate()
+                require(final.sourceId == sourceId &&
+                    final.mutationAuthority == safetyAuthorization.mutationAuthority
+                ) { "Capture finalization authority changed type or source." }
+                if (expectedFinalAuthority == AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION) {
+                    require(final.captureSessionId == safetyAuthorization.captureSessionId) {
+                        "Selector bootstrap cannot cross gateway capture sessions."
+                    }
+                    require(endAnchor == final.rawCanAnchor) {
+                        "Selector bootstrap end must bind to its exact live RAW_CAN lineage."
+                    }
                 }
             } else {
                 require(finalizationSafetyAuthorization == null) {
@@ -479,6 +679,13 @@ data class AndroidDiscoveryMarkerRecord(
         require(value == null || value.isNotBlank()) { "AndroidDiscoveryMarkerRecord value cannot be blank." }
         require(note == null || note.isNotBlank()) { "AndroidDiscoveryMarkerRecord note cannot be blank." }
         safetyAuthorization.validate()
+        if (safetyAuthorization.mutationAuthority ==
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+        ) {
+            require(evidenceAnchor == safetyAuthorization.rawCanAnchor) {
+                "Selector markers must bind to the exact authorized live RAW_CAN record."
+            }
+        }
     }
 }
 
@@ -520,6 +727,9 @@ data class AndroidVehicleCapabilityObservation(
         require(safetyAuthorization.sourceId == sourceId) {
             "Capability PARKED authorization source does not match the observed gateway."
         }
+        require(safetyAuthorization.mutationAuthority == AndroidDiscoveryMutationAuthority.PARKED &&
+            safetyAuthorization.healthVehicleMotion == VehicleMotion.PARKED
+        ) { "Vehicle capability observations require deterministic PARKED authority." }
     }
 
     companion object {

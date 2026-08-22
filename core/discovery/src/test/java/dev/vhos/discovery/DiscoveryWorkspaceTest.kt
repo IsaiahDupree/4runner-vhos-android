@@ -17,7 +17,7 @@ class DiscoveryWorkspaceTest {
     fun testLibraryIsVersionedCanonicalAndSafetyClassified() {
         val templates = AndroidDiscoveryTestLibrary.templates
 
-        assertEquals(15, templates.size)
+        assertEquals(16, templates.size)
         assertEquals(templates.size, templates.map { it.templateId }.distinct().size)
         assertTrue(templates.all { it.validate() === it })
         assertTrue(templates.any { it.executionAuthority == AndroidDiscoveryExecutionAuthority.PARKED_PASSIVE })
@@ -30,6 +30,14 @@ class DiscoveryWorkspaceTest {
         assertTrue(templates.flatMap { it.markers }.any {
             it.kind == AndroidDiscoveryMarkerKind.MANUAL_MEASUREMENT
         })
+        val selector = AndroidDiscoveryTestLibrary.requireTemplate(
+            AndroidDiscoveryTestLibrary.PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID,
+            AndroidDiscoveryTestLibrary.CONTRACT_VERSION,
+        )
+        assertTrue(AndroidDiscoveryTestLibrary.isCanonicalParkSelectorBootstrap(selector))
+        assertFalse(AndroidDiscoveryTestLibrary.isCanonicalParkSelectorBootstrap(
+            selector.copy(purpose = "A modified procedure must not inherit bootstrap authority."),
+        ))
     }
 
     @Test
@@ -112,7 +120,10 @@ class DiscoveryWorkspaceTest {
 
     @Test
     fun crossBootRecoveryIsAbortOnlyAndArchivedTemplateSnapshotNeedsNoCatalogLookup() {
-        val archived = AndroidDiscoveryTestLibrary.templates.first().copy(
+        val archived = AndroidDiscoveryTestLibrary.requireTemplate(
+            "vhos.discovery.brake-pulse",
+            AndroidDiscoveryTestLibrary.CONTRACT_VERSION,
+        ).copy(
             version = "9.9.9",
             title = "Archived procedure title",
         ).validate()
@@ -190,6 +201,25 @@ class DiscoveryWorkspaceTest {
         assertNull(snapshot.listenOnlyProven)
         assertNull(snapshot.obdEnumerationComplete)
         assertNull(snapshot.canCommunicationDetected)
+
+        val raw = anchor(80UL)
+        val bootstrap = AndroidDiscoverySafetyAuthorization(
+            sourceId = "gateway-1",
+            healthFrameSequence = 70UL,
+            healthGatewayMonotonicMicroseconds = 70_000UL,
+            receivedAtEpochMillis = 999_500L,
+            mutationAuthority = AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+            healthVehicleMotion = VehicleMotion.UNKNOWN,
+            captureSessionId = raw.canSessionId,
+            rawCanAnchor = raw,
+            rawCanReceivedAtEpochMillis = 999_700L,
+            listenOnlyProven = true,
+            captureActiveProven = true,
+            requiredCapability = AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY,
+        ).validate()
+        assertThrows(IllegalArgumentException::class.java) {
+            snapshot.copy(safetyAuthorization = bootstrap).validate()
+        }
     }
 
     @Test
@@ -213,10 +243,10 @@ class DiscoveryWorkspaceTest {
             parked.copy(vehicleMotion = VehicleMotion.MOVING), now,
         ).allowed)
         assertFalse(AndroidDiscoveryEngineeringSafetyGate.evaluate(
-            parked.copy(vehicleMotionObservedAtEpochMs = now - 2_001), now,
+            parked.copy(vehicleMotionObservedAtEpochMs = now - 5_001), now,
         ).allowed)
         assertFalse(AndroidDiscoveryEngineeringSafetyGate.evaluate(
-            parked.copy(lastFrameAtEpochMs = now - 2_001), now,
+            parked.copy(lastFrameAtEpochMs = now - 5_001), now,
         ).allowed)
         assertFalse(AndroidDiscoveryEngineeringSafetyGate.evaluate(
             parked.copy(phase = ConnectionPhase.DEGRADED), now,
@@ -236,13 +266,173 @@ class DiscoveryWorkspaceTest {
         assertTrue(AndroidDiscoveryEngineeringSafetyGate.evaluate(
             parked.copy(
                 vehicleMotionObservedAtEpochMs = now - 2_000,
-                lastFrameAtEpochMs = now - 2_000,
+                lastFrameAtEpochMs = now - 5_000,
             ),
             now,
         ).allowed)
         assertFalse(AndroidDiscoveryEngineeringSafetyGate.evaluate(
             parked.copy(vehicleMotionFrameSequence = null), now,
         ).allowed)
+        assertFalse(AndroidDiscoveryEngineeringSafetyGate.evaluate(
+            parked.copy(listenOnly = false), now,
+        ).allowed)
+        assertThrows(IllegalArgumentException::class.java) {
+            requireNotNull(gate.authorization).copy(listenOnlyProven = false).validate()
+        }
+    }
+
+    @Test
+    fun passiveSelectorBootstrapRequiresExactFreshUnknownCaptureLineage() {
+        val now = 1_000_000L
+        val template = AndroidDiscoveryTestLibrary.requireTemplate(
+            AndroidDiscoveryTestLibrary.PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID,
+            AndroidDiscoveryTestLibrary.CONTRACT_VERSION,
+        )
+        val eligible = device(
+            phase = ConnectionPhase.STREAMING,
+            motion = VehicleMotion.UNKNOWN,
+            observedAt = now - 400,
+            lastFrameAt = now - 100,
+        ).copy(
+            listenOnly = true,
+            gatewayCapabilities = setOf(AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY),
+            captureActive = true,
+            gatewayCaptureSessionId = 73u,
+            lastVehicleFrameAtEpochMs = now - 100,
+            lastVehicleCanSessionId = 73u,
+            lastVehicleCanSourceSequence = 901UL,
+            lastVehicleCanGatewayMonotonicMicroseconds = 44_100UL,
+        )
+
+        val gate = AndroidDiscoveryPassiveBootstrapPolicy.evaluate(template, eligible, now)
+        assertTrue(gate.allowed)
+        assertEquals(
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+            gate.authorization?.mutationAuthority,
+        )
+        assertEquals(73u, gate.authorization?.captureSessionId)
+        assertEquals(901UL, gate.authorization?.rawCanAnchor?.sourceSequence)
+        assertEquals(VehicleMotion.UNKNOWN, gate.authorization?.healthVehicleMotion)
+        assertFalse(AndroidDiscoveryEngineeringSafetyGate.evaluate(eligible, now).allowed)
+
+        listOf(
+            eligible.copy(vehicleMotion = VehicleMotion.PARKED),
+            eligible.copy(vehicleMotion = VehicleMotion.MOVING),
+            eligible.copy(vehicleMotionObservedAtEpochMs = now - 5_001),
+            eligible.copy(lastVehicleFrameAtEpochMs = now - 5_001),
+            eligible.copy(lastVehicleCanSessionId = 74u),
+            eligible.copy(captureActive = false),
+            eligible.copy(gatewayCapabilities = emptySet()),
+            eligible.copy(listenOnly = false),
+            eligible.copy(phase = ConnectionPhase.DEGRADED),
+            eligible.copy(lastVehicleCanSourceSequence = null),
+        ).forEach { invalid ->
+            assertFalse(AndroidDiscoveryPassiveBootstrapPolicy.evaluate(template, invalid, now).allowed)
+        }
+        assertFalse(AndroidDiscoveryPassiveBootstrapPolicy.evaluate(
+            template.copy(instructions = template.instructions + "Changed"),
+            eligible,
+            now,
+        ).allowed)
+    }
+
+    @Test
+    fun selectorBootstrapDraftAndMarkersRemainEvidenceOnlyAndSessionBound() {
+        val template = AndroidDiscoveryTestLibrary.requireTemplate(
+            AndroidDiscoveryTestLibrary.PARK_SELECTOR_BOOTSTRAP_TEMPLATE_ID,
+            AndroidDiscoveryTestLibrary.CONTRACT_VERSION,
+        )
+        val raw = anchor(100UL).copy(canSessionId = 73u)
+        val bootstrap = AndroidDiscoverySafetyAuthorization(
+            sourceId = "gateway-1",
+            healthFrameSequence = 90UL,
+            healthGatewayMonotonicMicroseconds = 90_000UL,
+            receivedAtEpochMillis = 999_500L,
+            mutationAuthority = AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP,
+            healthVehicleMotion = VehicleMotion.UNKNOWN,
+            captureSessionId = 73u,
+            rawCanAnchor = raw,
+            rawCanReceivedAtEpochMillis = 999_700L,
+            listenOnlyProven = true,
+            captureActiveProven = true,
+            requiredCapability = AndroidDiscoveryTestLibrary.PASSIVE_CAPTURE_CAPABILITY,
+        ).validate()
+        val active = AndroidDiscoveryCaptureDraft(
+            sessionId = "selector-bootstrap-1",
+            vehicleScopeId = "vehicle-scope-1",
+            vehicleProfileRevisionId = "profile-1",
+            sourceId = "gateway-1",
+            testTemplateId = template.templateId,
+            testTemplateVersion = template.version,
+            testTemplateSnapshot = template,
+            state = AndroidCaptureDraftState.ACTIVE,
+            startedAt = "2026-08-22T12:00:00Z",
+            startedElapsedRealtimeNanos = 100,
+            startedBootId = "boot-1",
+            endedAt = null,
+            endedElapsedRealtimeNanos = null,
+            endedBootId = null,
+            startAnchor = raw,
+            endAnchor = null,
+            startLogicalFrameCount = 10,
+            startCanObservationCount = 20,
+            endLogicalFrameCount = null,
+            endCanObservationCount = null,
+            safetyEvidence = AndroidDiscoverySafetyEvidence.PASSIVE_SELECTOR_BOOTSTRAP_UNKNOWN,
+            safetyAuthorization = bootstrap,
+            finalizationAuthority = null,
+            finalizationSafetyAuthorization = null,
+        ).validate()
+        AndroidDiscoveryMarkerRecord(
+            markerId = "selector-marker-1",
+            captureSessionId = active.sessionId,
+            eventType = template.markers[1].eventType,
+            label = template.markers[1].label,
+            kind = template.markers[1].kind,
+            value = null,
+            unit = null,
+            observedAt = "2026-08-22T12:00:01Z",
+            elapsedRealtimeNanos = 101,
+            evidenceAnchor = raw,
+            observer = "owner",
+            note = null,
+            safetyAuthorization = bootstrap,
+        ).validate()
+        active.copy(
+            state = AndroidCaptureDraftState.COMPLETED,
+            endedAt = "2026-08-22T12:00:05Z",
+            endedElapsedRealtimeNanos = 105,
+            endedBootId = "boot-1",
+            endAnchor = raw,
+            endLogicalFrameCount = 15,
+            endCanObservationCount = 25,
+            finalizationAuthority =
+                AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION,
+            finalizationSafetyAuthorization = bootstrap.copy(healthFrameSequence = 91UL),
+        ).validate()
+
+        assertThrows(IllegalArgumentException::class.java) {
+            active.copy(
+                safetyEvidence = AndroidDiscoverySafetyEvidence.VALIDATED_GATEWAY_HEALTH_PARKED,
+            ).validate()
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidDiscoveryMarkerRecord(
+                markerId = "wrong-anchor",
+                captureSessionId = active.sessionId,
+                eventType = template.markers[1].eventType,
+                label = template.markers[1].label,
+                kind = template.markers[1].kind,
+                value = null,
+                unit = null,
+                observedAt = "2026-08-22T12:00:01Z",
+                elapsedRealtimeNanos = 101,
+                evidenceAnchor = raw.copy(sourceSequence = 101UL),
+                observer = "owner",
+                note = null,
+                safetyAuthorization = bootstrap,
+            ).validate()
+        }
     }
 
     @Test
@@ -288,6 +478,7 @@ class DiscoveryWorkspaceTest {
         healthFrameSequence = sequence,
         healthGatewayMonotonicMicroseconds = sequence * 1_000UL,
         receivedAtEpochMillis = 999_500L,
+        listenOnlyProven = true,
     )
 
     @Test
@@ -343,5 +534,6 @@ class DiscoveryWorkspaceTest {
         vehicleMotionFrameSequence = 41UL,
         vehicleMotionGatewayMonotonicMicroseconds = 41_000UL,
         lastFrameAtEpochMs = lastFrameAt,
+        listenOnly = true,
     )
 }
