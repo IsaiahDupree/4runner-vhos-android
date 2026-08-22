@@ -81,6 +81,7 @@ class MainActivity : Activity() {
     private lateinit var releaseHub: ReleaseHubManager
     private var pendingExport: ByteArray? = null
     private var pendingDigitalTwinExport: ByteArray? = null
+    private var observingRuntime = false
     private val observer: (HeadUnitSnapshot) -> Unit = ::render
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,9 +90,24 @@ class MainActivity : Activity() {
             runOnUiThread { renderRelease(snapshot) }
         }
         setContentView(buildContent())
-        HeadUnitRuntime.observe(observer)
         releaseHub.refresh()
         initializeEvidenceStore()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!observingRuntime) {
+            observingRuntime = true
+            HeadUnitRuntime.observe(observer)
+        }
+    }
+
+    override fun onStop() {
+        if (observingRuntime) {
+            HeadUnitRuntime.removeObserver(observer)
+            observingRuntime = false
+        }
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -100,7 +116,10 @@ class MainActivity : Activity() {
         replayGeneration++
         reliabilityRunning = false
         reliabilityGeneration++
-        HeadUnitRuntime.removeObserver(observer)
+        if (observingRuntime) {
+            HeadUnitRuntime.removeObserver(observer)
+            observingRuntime = false
+        }
         releaseHub.close()
         super.onDestroy()
     }
@@ -169,6 +188,11 @@ class MainActivity : Activity() {
             "Vehicle profile" to ::editVehicleProfile,
             "Refresh inventory" to ::captureHeadUnitInventory,
             "Export digital twin" to ::prepareDigitalTwinExport,
+        ))
+        controls.addView(controlRow(
+            "Open Discovery Engineering" to {
+                startActivity(Intent(this, DiscoveryActivity::class.java))
+            },
         ))
         root.addView(controls)
 
@@ -304,7 +328,10 @@ class MainActivity : Activity() {
         val store = evidenceStoreOrNotify() ?: return
         Thread {
             try {
-                val records = store.recentPortableFrames()
+                val scope = requireNotNull(
+                    store.resolveDiscoveryEvidenceScope(HeadUnitRuntime.snapshot().obd.sourceId)
+                ) { "Vehicle/source scope is unresolved; export cannot mix vehicle evidence." }
+                val records = store.recentPortableFrames(scope)
                 if (records.isEmpty()) throw IllegalStateException("No validated logical frames are stored yet.")
                 pendingExport = EvidenceBundles.toByteArray(
                     records = records,
@@ -584,7 +611,10 @@ class MainActivity : Activity() {
             try {
                 val bundle = contentResolver.openInputStream(uri)?.use(EvidenceBundles::read)
                     ?: throw IllegalStateException("Android did not provide an import stream.")
-                val inserted = store.importBundle(bundle)
+                val scope = requireNotNull(
+                    store.resolveDiscoveryEvidenceScope(HeadUnitRuntime.snapshot().obd.sourceId)
+                ) { "Vehicle/source scope is unresolved; import requires an explicit current vehicle binding." }
+                val inserted = store.importBundle(bundle, scope)
                 HeadUnitRuntime.markImport(System.currentTimeMillis())
                 refreshCounts()
                 refreshDiscovery()
@@ -613,7 +643,10 @@ class MainActivity : Activity() {
         }
         Thread {
             try {
-                val total = store.counts().canObservations
+                val scope = requireNotNull(
+                    store.resolveDiscoveryEvidenceScope(HeadUnitRuntime.snapshot().obd.sourceId)
+                ) { "Vehicle/source scope is unresolved; save a vehicle profile and validate one OBD gateway." }
+                val total = store.discoveryEvidenceSummary(scope).canObservations
                 if (total == 0L) {
                     runOnUiThread {
                         discoveryCard.text = buildString {
@@ -631,7 +664,7 @@ class MainActivity : Activity() {
                     }
                     return@Thread
                 }
-                val persisted = store.recentCanObservations(DISCOVERY_RECORD_LIMIT)
+                val persisted = store.recentCanObservations(scope, DISCOVERY_RECORD_LIMIT)
                 val observations = persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
                 val report = CanDiscoveryAnalyzer.analyze(observations)
                 val hypothesisResult = runCatching {
@@ -816,6 +849,10 @@ class MainActivity : Activity() {
 
     private fun startHistoricalReplay(repeat: Int, paced: Boolean) {
         val store = evidenceStoreOrNotify() ?: return
+        if (HeadUnitRuntime.snapshot().running) {
+            showToast("Stop the live vehicle session before replay to protect BLE ingestion.")
+            return
+        }
         val generation = synchronized(this) {
             replayGeneration++
             replayRunning = true
@@ -829,7 +866,14 @@ class MainActivity : Activity() {
         replayCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
         Thread {
             try {
-                val persisted = store.recentCanObservations(REPLAY_RECORD_LIMIT)
+                require(!HeadUnitRuntime.snapshot().running) {
+                    "Replay blocked because a live vehicle session started."
+                }
+                val scope = requireNotNull(
+                    store.resolveDiscoveryEvidenceScope(HeadUnitRuntime.snapshot().obd.sourceId)
+                ) { "Vehicle/source scope is unresolved; replay cannot mix gateways." }
+                val inputLimit = if (repeat > 1) REPLAY_STRESS_RECORD_LIMIT else REPLAY_RECORD_LIMIT
+                val persisted = store.recentCanObservations(scope, inputLimit)
                 if (persisted.isEmpty()) {
                     throw IllegalStateException(
                         "No persisted CAN observations are available. Import verified iPhone evidence first."
@@ -840,7 +884,8 @@ class MainActivity : Activity() {
                     input = persisted.map { DiscoveryObservation(it.sourceId, it.observation) },
                     repeat = repeat,
                     shouldContinue = {
-                        !activityDestroyed && replayRunning && replayGeneration == generation
+                        !activityDestroyed && replayRunning && replayGeneration == generation &&
+                            !HeadUnitRuntime.snapshot().running
                     },
                     onRecord = { progress ->
                         if (paced) {
@@ -855,7 +900,7 @@ class MainActivity : Activity() {
                             if (pauseNanoseconds > 0) LockSupport.parkNanos(pauseNanoseconds)
                             priorCaptureOffset = progress.sourceCaptureOffsetMicroseconds
                         }
-                        if (progress.recordIndex == 1 || progress.recordIndex % 64 == 0 ||
+                        if (progress.recordIndex == 1 || progress.recordIndex % REPLAY_UI_PROGRESS_INTERVAL == 0 ||
                             progress.recordIndex == progress.totalExpectedRecords
                         ) {
                             renderReplayProgress(generation, progress, repeat, paced)
@@ -973,6 +1018,10 @@ class MainActivity : Activity() {
 
     private fun startLinkReliabilityLab() {
         val store = evidenceStoreOrNotify() ?: return
+        if (HeadUnitRuntime.snapshot().running) {
+            showToast("Stop the live vehicle session before the reliability lab.")
+            return
+        }
         val generation = synchronized(this) {
             reliabilityGeneration++
             reliabilityRunning = true
@@ -986,7 +1035,10 @@ class MainActivity : Activity() {
         reliabilityCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
         Thread {
             try {
-                val persisted = store.recentCanObservations(RELIABILITY_RECORD_LIMIT)
+                val scope = requireNotNull(
+                    store.resolveDiscoveryEvidenceScope(HeadUnitRuntime.snapshot().obd.sourceId)
+                ) { "Vehicle/source scope is unresolved; reliability replay cannot mix gateways." }
+                val persisted = store.recentCanObservations(scope, RELIABILITY_RECORD_LIMIT)
                 if (persisted.isEmpty()) {
                     throw IllegalStateException(
                         "No persisted CAN observations are available. Import verified iPhone evidence first."
@@ -997,7 +1049,7 @@ class MainActivity : Activity() {
                     soakCycles = RELIABILITY_SOAK_CYCLES,
                     shouldContinue = {
                         !activityDestroyed && reliabilityRunning &&
-                            reliabilityGeneration == generation
+                            reliabilityGeneration == generation && !HeadUnitRuntime.snapshot().running
                     },
                 )
                 synchronized(this) {
@@ -1112,7 +1164,7 @@ class MainActivity : Activity() {
                 val security = store.securityStatus
                 appendLine("LOCAL EVIDENCE  ${snapshot.storedLogicalFrames} FRAMES")
                 appendLine("CAN observations: ${snapshot.storedCanObservations}")
-                appendLine("Database: append-only SQLCipher / WAL • schema v2")
+                appendLine("Database: append-only SQLCipher / WAL • schema v5")
                 appendLine("Encryption: ${security.cipherVersion} • KEYSTORE ENVELOPE v${security.keyEnvelopeVersion}")
                 appendLine("Key: ${security.keyProtection}")
                 appendLine("Migration: ${security.migrationState.displayName.uppercase(Locale.US)}")
@@ -1403,6 +1455,8 @@ class MainActivity : Activity() {
         private const val DIGITAL_TWIN_EXPORT_REQUEST = 1004
         private const val DISCOVERY_RECORD_LIMIT = 100_000
         private const val REPLAY_RECORD_LIMIT = 100_000
+        private const val REPLAY_STRESS_RECORD_LIMIT = 10_000
+        private const val REPLAY_UI_PROGRESS_INTERVAL = 2_048
         private const val REPLAY_SPEED_MULTIPLIER = 25.0
         private const val RELIABILITY_RECORD_LIMIT = 100_000
         private const val RELIABILITY_SOAK_CYCLES = 20

@@ -3,9 +3,20 @@ package dev.vhos.store
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import com.google.gson.FieldNamingPolicy
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import dev.vhos.discovery.AndroidDiscoveryCaptureDraft
+import dev.vhos.discovery.AndroidCaptureDraftState
+import dev.vhos.discovery.AndroidCaptureFinalizationAuthority
+import dev.vhos.discovery.AndroidDiscoveryEvidenceAnchor
+import dev.vhos.discovery.AndroidDiscoveryMarkerKind
+import dev.vhos.discovery.AndroidDiscoverySafetyEvidence
+import dev.vhos.discovery.AndroidDiscoveryMarkerRecord
+import dev.vhos.discovery.AndroidDiscoverySafetyAuthorization
+import dev.vhos.discovery.AndroidDiscoveryTestTemplate
+import dev.vhos.discovery.AndroidVehicleCapabilityObservation
 import dev.vhos.digitaltwin.DigitalTwinSnapshot
 import dev.vhos.digitaltwin.HeadUnitInventory
 import dev.vhos.digitaltwin.HealthAssessment
@@ -38,8 +49,38 @@ data class PersistedSource(
 )
 
 data class PersistedCanObservation(
+    val vehicleScopeId: String,
+    val vehicleProfileRevisionId: String,
     val sourceId: String,
     val observation: CanObservation,
+)
+
+data class DiscoveryEvidenceSummary(
+    val canObservations: Long,
+    val canCaptureSessions: Long,
+    val uniqueCanIdentifiers: Int,
+    val firstIngestedAt: String?,
+    val lastIngestedAt: String?,
+)
+
+data class DiscoveryEvidenceScope(
+    val vehicleScopeId: String,
+    val vehicleProfileRevisionId: String,
+    val sourceId: String,
+) {
+    fun validate(): DiscoveryEvidenceScope = apply {
+        require(vehicleScopeId.isNotBlank() && vehicleProfileRevisionId.isNotBlank() && sourceId.isNotBlank()) {
+            "Vehicle scope, profile revision, and source are required for persisted evidence."
+        }
+    }
+
+    internal fun queryArguments(): Array<String> =
+        arrayOf(vehicleScopeId, vehicleProfileRevisionId, sourceId)
+}
+
+data class PersistedAndroidDiscoveryCapture(
+    val session: AndroidDiscoveryCaptureDraft,
+    val eventMarkerCount: Int,
 )
 
 class EvidenceDatabase private constructor(
@@ -79,10 +120,18 @@ class EvidenceDatabase private constructor(
             )
             """.trimIndent()
         )
+        createScopedEvidenceTables(database)
+        createDigitalTwinTables(database)
+        createDiscoveryTables(database)
+    }
+
+    private fun createScopedEvidenceTables(database: SQLiteDatabase) {
         database.execSQL(
             """
-            CREATE TABLE logical_frames (
+            CREATE TABLE IF NOT EXISTS logical_frames (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
+              vehicle_scope_id TEXT NOT NULL,
+              vehicle_profile_revision_id TEXT NOT NULL,
               source_id TEXT NOT NULL,
               source_role TEXT NOT NULL,
               source_sequence TEXT NOT NULL,
@@ -95,14 +144,16 @@ class EvidenceDatabase private constructor(
               envelope_sha256 TEXT NOT NULL,
               ingested_at TEXT NOT NULL,
               FOREIGN KEY(source_id) REFERENCES sources(source_id),
-              UNIQUE(source_id, source_sequence, message_type, envelope_sha256)
+              UNIQUE(vehicle_scope_id, vehicle_profile_revision_id, source_id, source_sequence, message_type, envelope_sha256)
             )
             """.trimIndent()
         )
         database.execSQL(
             """
-            CREATE TABLE can_observations (
+            CREATE TABLE IF NOT EXISTS can_observations (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
+              vehicle_scope_id TEXT NOT NULL,
+              vehicle_profile_revision_id TEXT NOT NULL,
               source_id TEXT NOT NULL,
               session_id TEXT NOT NULL,
               source_sequence TEXT NOT NULL,
@@ -116,24 +167,31 @@ class EvidenceDatabase private constructor(
               data BLOB NOT NULL,
               ingested_at TEXT NOT NULL,
               FOREIGN KEY(source_id) REFERENCES sources(source_id),
-              UNIQUE(source_id, session_id, source_sequence)
+              UNIQUE(vehicle_scope_id, vehicle_profile_revision_id, source_id, session_id, source_sequence)
             )
             """.trimIndent()
         )
         database.execSQL(
             """
-            CREATE TABLE import_receipts (
+            CREATE TABLE IF NOT EXISTS import_receipts (
               bundle_id TEXT NOT NULL,
               manifest_sha256 TEXT NOT NULL,
+              vehicle_scope_id TEXT NOT NULL,
+              vehicle_profile_revision_id TEXT NOT NULL,
               imported_at TEXT NOT NULL,
               record_count INTEGER NOT NULL,
-              PRIMARY KEY(bundle_id, manifest_sha256)
+              PRIMARY KEY(bundle_id, manifest_sha256, vehicle_scope_id, vehicle_profile_revision_id)
             )
             """.trimIndent()
         )
-        database.execSQL("CREATE INDEX logical_frames_ingested ON logical_frames(ingested_at)")
-        database.execSQL("CREATE INDEX can_observations_source_sequence ON can_observations(source_id, source_sequence)")
-        createDigitalTwinTables(database)
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS logical_frames_scope_ingested ON " +
+                "logical_frames(vehicle_scope_id, vehicle_profile_revision_id, source_id, ingested_at)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS can_observations_scope_sequence ON " +
+                "can_observations(vehicle_scope_id, vehicle_profile_revision_id, source_id, source_sequence)"
+        )
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -141,6 +199,21 @@ class EvidenceDatabase private constructor(
         if (migratedVersion == 1) {
             createDigitalTwinTables(database)
             migratedVersion = 2
+        }
+        if (migratedVersion == 2) {
+            createDiscoveryTables(database)
+            migratedVersion = 3
+        }
+        if (migratedVersion == 3) {
+            quarantineUnscopedDiscoveryV3(database)
+            createDiscoveryTables(database)
+            migratedVersion = 4
+        }
+        if (migratedVersion == 4) {
+            quarantineUnscopedEvidenceV4(database)
+            createScopedEvidenceTables(database)
+            createDiscoveryTables(database)
+            migratedVersion = 5
         }
         check(migratedVersion == newVersion) {
             "Evidence database migration $oldVersion -> $newVersion is not implemented; destructive migration is forbidden."
@@ -196,6 +269,163 @@ class EvidenceDatabase private constructor(
         )
         database.execSQL(
             "CREATE INDEX IF NOT EXISTS health_assessments_system ON health_assessments(system_id, id)"
+        )
+    }
+
+    private fun createDiscoveryTables(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS discovery_capture_sessions (
+              session_id TEXT PRIMARY KEY NOT NULL,
+              vehicle_scope_id TEXT NOT NULL,
+              vehicle_profile_revision_id TEXT NOT NULL,
+              capture_source_id TEXT NOT NULL,
+              test_template_id TEXT NOT NULL,
+              test_template_version TEXT NOT NULL,
+              test_template_snapshot_json TEXT NOT NULL,
+              test_template_snapshot_sha256 TEXT NOT NULL,
+              state TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              started_elapsed_realtime_nanos TEXT NOT NULL,
+              started_boot_id TEXT NOT NULL,
+              ended_at TEXT,
+              ended_elapsed_realtime_nanos TEXT,
+              ended_boot_id TEXT,
+              start_source_id TEXT,
+              start_can_session_id TEXT,
+              start_source_sequence TEXT,
+              start_gateway_monotonic_us TEXT,
+              end_source_id TEXT,
+              end_can_session_id TEXT,
+              end_source_sequence TEXT,
+              end_gateway_monotonic_us TEXT,
+              start_logical_frame_count INTEGER NOT NULL,
+              start_can_observation_count INTEGER NOT NULL,
+              end_logical_frame_count INTEGER,
+              end_can_observation_count INTEGER,
+              safety_evidence TEXT NOT NULL,
+              safety_authorization_source_id TEXT NOT NULL,
+              safety_authorization_frame_sequence TEXT NOT NULL,
+              safety_authorization_gateway_monotonic_us TEXT NOT NULL,
+              safety_authorization_received_at_ms INTEGER NOT NULL,
+              finalization_authority TEXT,
+              finalization_authorization_source_id TEXT,
+              finalization_authorization_frame_sequence TEXT,
+              finalization_authorization_gateway_monotonic_us TEXT,
+              finalization_authorization_received_at_ms INTEGER
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS discovery_event_markers (
+              marker_id TEXT PRIMARY KEY NOT NULL,
+              capture_session_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              label TEXT NOT NULL,
+              marker_kind TEXT NOT NULL,
+              value_text TEXT,
+              unit TEXT,
+              observed_at TEXT NOT NULL,
+              elapsed_realtime_nanos TEXT NOT NULL,
+              source_id TEXT,
+              can_session_id TEXT,
+              nearest_source_sequence TEXT,
+              nearest_gateway_monotonic_us TEXT,
+              observer TEXT NOT NULL,
+              note TEXT,
+              safety_authorization_source_id TEXT NOT NULL,
+              safety_authorization_frame_sequence TEXT NOT NULL,
+              safety_authorization_gateway_monotonic_us TEXT NOT NULL,
+              safety_authorization_received_at_ms INTEGER NOT NULL,
+              FOREIGN KEY(capture_session_id) REFERENCES discovery_capture_sessions(session_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS android_capability_observations (
+              snapshot_id TEXT PRIMARY KEY NOT NULL,
+              snapshot_fingerprint TEXT NOT NULL UNIQUE,
+              snapshot_json TEXT NOT NULL,
+              captured_at TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_active_discovery_capture " +
+                "ON discovery_capture_sessions(state) WHERE state = 'ACTIVE'"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS discovery_capture_started " +
+                "ON discovery_capture_sessions(" +
+                "vehicle_scope_id, vehicle_profile_revision_id, capture_source_id, started_at DESC)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS discovery_marker_session_time " +
+                "ON discovery_event_markers(capture_session_id, elapsed_realtime_nanos)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS android_capability_observation_captured " +
+                "ON android_capability_observations(captured_at DESC)"
+        )
+    }
+
+    /**
+     * Schema-v3 drafts did not retain a vehicle/source scope, immutable template snapshot, boot
+     * identity, or the authorizing gateway-health frame. Those rows are preserved verbatim but
+     * quarantined instead of being upgraded with invented authority.
+     */
+    private fun quarantineUnscopedDiscoveryV3(database: SQLiteDatabase) {
+        database.execSQL("DROP INDEX IF EXISTS one_active_discovery_capture")
+        database.execSQL("DROP INDEX IF EXISTS discovery_capture_started")
+        database.execSQL("DROP INDEX IF EXISTS discovery_marker_session_time")
+        database.execSQL("DROP INDEX IF EXISTS android_capability_observation_captured")
+        database.execSQL(
+            "ALTER TABLE discovery_capture_sessions " +
+                "RENAME TO discovery_capture_sessions_v3_unscoped"
+        )
+        database.execSQL(
+            "ALTER TABLE discovery_event_markers " +
+                "RENAME TO discovery_event_markers_v3_unscoped"
+        )
+        database.execSQL(
+            "ALTER TABLE android_capability_observations " +
+                "RENAME TO android_capability_observations_v3_unscoped"
+        )
+    }
+
+    /**
+     * Schema-v4 raw rows named a physical gateway but did not bind that observation to the vehicle
+     * profile that was current when the bytes arrived. A gateway can be moved between vehicles, so
+     * source_id alone is not a vehicle identity. Preserve every legacy row verbatim, but quarantine
+     * it and every Discovery draft derived from it rather than inventing a vehicle lineage.
+     */
+    private fun quarantineUnscopedEvidenceV4(database: SQLiteDatabase) {
+        listOf(
+            "logical_frames_ingested",
+            "can_observations_source_sequence",
+            "logical_frames_scope_ingested",
+            "can_observations_scope_sequence",
+            "one_active_discovery_capture",
+            "discovery_capture_started",
+            "discovery_marker_session_time",
+            "android_capability_observation_captured",
+        ).forEach { database.execSQL("DROP INDEX IF EXISTS $it") }
+        database.execSQL("ALTER TABLE logical_frames RENAME TO logical_frames_v4_unscoped")
+        database.execSQL("ALTER TABLE can_observations RENAME TO can_observations_v4_unscoped")
+        database.execSQL("ALTER TABLE import_receipts RENAME TO import_receipts_v4_unscoped")
+        database.execSQL(
+            "ALTER TABLE discovery_capture_sessions " +
+                "RENAME TO discovery_capture_sessions_v4_unbound_evidence"
+        )
+        database.execSQL(
+            "ALTER TABLE discovery_event_markers " +
+                "RENAME TO discovery_event_markers_v4_unbound_evidence"
+        )
+        database.execSQL(
+            "ALTER TABLE android_capability_observations " +
+                "RENAME TO android_capability_observations_v4_unbound_evidence"
         )
     }
 
@@ -429,14 +659,19 @@ class EvidenceDatabase private constructor(
 
     @Synchronized
     fun persistFrame(
-        sourceId: String,
+        scope: DiscoveryEvidenceScope,
         sourceRole: DeviceRole,
         frame: GatewayFrame,
         envelope: ByteArray,
         ingestedAt: Instant = Instant.now(),
     ): Boolean {
+        scope.validate()
+        requireSourceRole(writableDatabase, scope.sourceId, sourceRole)
+        if (resolveEvidenceScope(writableDatabase, scope.sourceId, sourceRole) != scope) return false
         val values = ContentValues().apply {
-            put("source_id", sourceId)
+            put("vehicle_scope_id", scope.vehicleScopeId)
+            put("vehicle_profile_revision_id", scope.vehicleProfileRevisionId)
+            put("source_id", scope.sourceId)
             put("source_role", sourceRole.wireValue)
             put("source_sequence", frame.sequence.toString())
             put("source_monotonic_us", frame.monotonicMicroseconds.toString())
@@ -455,19 +690,26 @@ class EvidenceDatabase private constructor(
 
     @Synchronized
     fun persistCanObservation(
-        sourceId: String,
+        scope: DiscoveryEvidenceScope,
         observation: CanObservation,
         ingestedAt: Instant = Instant.now(),
-    ): Boolean = insertCanObservation(writableDatabase, sourceId, observation, ingestedAt)
+    ): Boolean {
+        scope.validate()
+        requireSourceRole(writableDatabase, scope.sourceId, DeviceRole.OBD_CAN)
+        if (resolveEvidenceScope(writableDatabase, scope.sourceId, DeviceRole.OBD_CAN) != scope) return false
+        return insertCanObservation(writableDatabase, scope, observation, ingestedAt)
+    }
 
     private fun insertCanObservation(
         database: SQLiteDatabase,
-        sourceId: String,
+        scope: DiscoveryEvidenceScope,
         observation: CanObservation,
         ingestedAt: Instant,
     ): Boolean {
         val values = ContentValues().apply {
-            put("source_id", sourceId)
+            put("vehicle_scope_id", scope.vehicleScopeId)
+            put("vehicle_profile_revision_id", scope.vehicleProfileRevisionId)
+            put("source_id", scope.sourceId)
             put("session_id", observation.sessionId.toString())
             put("source_sequence", observation.sourceSequence.toString())
             put("source_monotonic_us", observation.monotonicMicroseconds.toString())
@@ -492,40 +734,47 @@ class EvidenceDatabase private constructor(
     )
 
     @Synchronized
-    fun recentCanObservations(limit: Int = 100_000): List<PersistedCanObservation> {
+    fun recentCanObservations(
+        scope: DiscoveryEvidenceScope,
+        limit: Int = 100_000,
+    ): List<PersistedCanObservation> {
+        scope.validate()
         require(limit in 1..100_000)
         val observations = mutableListOf<PersistedCanObservation>()
         readableDatabase.query(
             "can_observations",
             arrayOf(
-                "source_id", "session_id", "source_sequence", "source_monotonic_us",
+                "vehicle_scope_id", "vehicle_profile_revision_id", "source_id", "session_id",
+                "source_sequence", "source_monotonic_us",
                 "bitrate_bps", "identifier", "extended", "remote_request", "listen_only",
                 "data_length", "data",
             ),
-            null,
-            null,
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            scope.queryArguments(),
             null,
             null,
             "id DESC",
             limit.toString(),
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                val dataLength = cursor.getInt(9)
-                val data = cursor.getBlob(10)
+                val dataLength = cursor.getInt(11)
+                val data = cursor.getBlob(12)
                 require(dataLength in 0..8 && data.size == 8) {
                     "Persisted CAN observation payload shape is invalid."
                 }
                 observations += PersistedCanObservation(
-                    sourceId = cursor.getString(0),
+                    vehicleScopeId = cursor.getString(0),
+                    vehicleProfileRevisionId = cursor.getString(1),
+                    sourceId = cursor.getString(2),
                     observation = CanObservation(
-                        sessionId = cursor.getString(1).toUInt(),
-                        sourceSequence = cursor.getString(2).toULong(),
-                        monotonicMicroseconds = cursor.getString(3).toULong(),
-                        bitrateBps = cursor.getInt(4),
-                        identifier = cursor.getLong(5).toUInt(),
-                        extended = cursor.getInt(6) == 1,
-                        remoteRequest = cursor.getInt(7) == 1,
-                        listenOnly = cursor.getInt(8) == 1,
+                        sessionId = cursor.getString(3).toUInt(),
+                        sourceSequence = cursor.getString(4).toULong(),
+                        monotonicMicroseconds = cursor.getString(5).toULong(),
+                        bitrateBps = cursor.getInt(6),
+                        identifier = cursor.getLong(7).toUInt(),
+                        extended = cursor.getInt(8) == 1,
+                        remoteRequest = cursor.getInt(9) == 1,
+                        listenOnly = cursor.getInt(10) == 1,
                         dataLength = dataLength,
                         data = data,
                     ),
@@ -536,7 +785,655 @@ class EvidenceDatabase private constructor(
     }
 
     @Synchronized
-    fun recentPortableFrames(limit: Int = 20_000): List<PortableEvidenceRecord> {
+    fun discoveryEvidenceSummary(scope: DiscoveryEvidenceScope): DiscoveryEvidenceSummary {
+        scope.validate()
+        return readableDatabase.rawQuery(
+        """
+        SELECT COUNT(*),
+               COUNT(DISTINCT source_id || ':' || session_id),
+               COUNT(DISTINCT extended || ':' || identifier),
+               MIN(ingested_at),
+               MAX(ingested_at)
+        FROM can_observations
+        WHERE vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?
+        """.trimIndent(),
+        scope.queryArguments(),
+    ).use { cursor ->
+        check(cursor.moveToFirst()) { "CAN evidence summary query returned no row." }
+        DiscoveryEvidenceSummary(
+            canObservations = cursor.getLong(0),
+            canCaptureSessions = cursor.getLong(1),
+            uniqueCanIdentifiers = cursor.getInt(2),
+            firstIngestedAt = cursor.nullableString(3),
+            lastIngestedAt = cursor.nullableString(4),
+        )
+    }
+    }
+
+    @Synchronized
+    fun evidenceCounts(scope: DiscoveryEvidenceScope): EvidenceCounts {
+        scope.validate()
+        val logical = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM logical_frames WHERE " +
+                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            scope.queryArguments(),
+        ).use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
+        val can = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM can_observations WHERE " +
+                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            scope.queryArguments(),
+        ).use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
+        return EvidenceCounts(logical, can)
+    }
+
+    @Synchronized
+    fun resolveDiscoveryEvidenceScope(preferredSourceId: String? = null): DiscoveryEvidenceScope? {
+        require(preferredSourceId == null || preferredSourceId.isNotBlank())
+        val obdSources = latestValidatedSources().filter { it.role == DeviceRole.OBD_CAN }
+        val source = preferredSourceId?.let { preferred ->
+            obdSources.singleOrNull { it.sourceId == preferred }
+        } ?: obdSources.singleOrNull() ?: return null
+        return resolveEvidenceScope(readableDatabase, source.sourceId, DeviceRole.OBD_CAN)
+    }
+
+    /** Resolves the current immutable vehicle/profile binding for any validated VHOS source. */
+    @Synchronized
+    fun resolveEvidenceScope(sourceId: String): DiscoveryEvidenceScope? {
+        require(sourceId.isNotBlank())
+        return resolveEvidenceScope(readableDatabase, sourceId, requiredRole = null)
+    }
+
+    private fun resolveEvidenceScope(
+        database: SQLiteDatabase,
+        sourceId: String,
+        requiredRole: DeviceRole?,
+    ): DiscoveryEvidenceScope? {
+        val role = database.query(
+            "sources",
+            arrayOf("role"),
+            "source_id = ?",
+            arrayOf(sourceId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            DeviceRole.entries.firstOrNull { it.wireValue == cursor.getString(0) } ?: return null
+        }
+        if (requiredRole != null && role != requiredRole) return null
+        val profile = latestVehicleProfile(database) ?: return null
+        val stableVehicleIdentity = buildString {
+            append(profile.vehiclePackId)
+            append('|')
+            append(profile.vehiclePackVersion)
+            append('|')
+            append(profile.vin ?: "profile-revision:${profile.revisionId}")
+        }
+        return DiscoveryEvidenceScope(
+            vehicleScopeId = "vehicle-sha256:" +
+                EvidenceBundles.sha256(stableVehicleIdentity.toByteArray()),
+            vehicleProfileRevisionId = profile.revisionId,
+            sourceId = sourceId,
+        ).validate()
+    }
+
+    private fun requireSourceRole(
+        database: SQLiteDatabase,
+        sourceId: String,
+        expectedRole: DeviceRole,
+    ) {
+        val role = database.query(
+            "sources",
+            arrayOf("role"),
+            "source_id = ?",
+            arrayOf(sourceId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            require(cursor.moveToFirst()) { "Evidence source is not validated." }
+            cursor.getString(0)
+        }
+        require(role == expectedRole.wireValue) {
+            "Evidence source role does not match the persisted frame role."
+        }
+    }
+
+    private fun requireCurrentScope(
+        database: SQLiteDatabase,
+        expected: DiscoveryEvidenceScope,
+        requiredRole: DeviceRole = DeviceRole.OBD_CAN,
+    ) {
+        val current = resolveEvidenceScope(database, expected.sourceId, requiredRole)
+        require(current == expected) {
+            "Discovery vehicle/profile/source scope changed; start a new capture for the current vehicle."
+        }
+    }
+
+    @Synchronized
+    fun latestDiscoveryEvidenceAnchor(scope: DiscoveryEvidenceScope): AndroidDiscoveryEvidenceAnchor? {
+        scope.validate()
+        return readableDatabase.query(
+            "can_observations",
+            arrayOf("source_id", "session_id", "source_sequence", "source_monotonic_us"),
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            scope.queryArguments(),
+            null,
+            null,
+            "id DESC",
+            "1",
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) null
+            else AndroidDiscoveryEvidenceAnchor(
+                sourceId = cursor.getString(0),
+                canSessionId = cursor.getString(1).toUInt(),
+                sourceSequence = cursor.getString(2).toULong(),
+                gatewayMonotonicMicroseconds = cursor.getString(3).toULong(),
+            ).validate()
+        }
+    }
+
+    @Synchronized
+    fun beginDiscoveryCapture(session: AndroidDiscoveryCaptureDraft) {
+        session.validate()
+        require(session.state == AndroidCaptureDraftState.ACTIVE) {
+            "A newly persisted AndroidDiscoveryCaptureDraft must be ACTIVE."
+        }
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            requireCurrentScope(database, session.evidenceScope())
+            val activeExists = database.query(
+                "discovery_capture_sessions",
+                arrayOf("session_id"),
+                "state = ?",
+                arrayOf(AndroidCaptureDraftState.ACTIVE.name),
+                null,
+                null,
+                null,
+                "1",
+            ).use { it.moveToFirst() }
+            require(!activeExists) { "A Discovery AndroidDiscoveryCaptureDraft is already active." }
+            database.insertOrThrow(
+                "discovery_capture_sessions",
+                null,
+                captureSessionStartValues(session),
+            )
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun finalizeDiscoveryCapture(session: AndroidDiscoveryCaptureDraft) {
+        session.validate()
+        require(session.state != AndroidCaptureDraftState.ACTIVE) {
+            "Final AndroidDiscoveryCaptureDraft state must be COMPLETED or ABORTED."
+        }
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val stored = requireNotNull(captureSessionById(database, session.sessionId)) {
+                "AndroidDiscoveryCaptureDraft ${session.sessionId} does not exist."
+            }
+            require(stored.state == AndroidCaptureDraftState.ACTIVE) {
+                "AndroidDiscoveryCaptureDraft ${session.sessionId} was already finalized."
+            }
+            if (session.state == AndroidCaptureDraftState.COMPLETED) {
+                requireCurrentScope(database, stored.evidenceScope())
+            }
+            require(
+                stored.vehicleScopeId == session.vehicleScopeId &&
+                    stored.vehicleProfileRevisionId == session.vehicleProfileRevisionId &&
+                    stored.sourceId == session.sourceId &&
+                    stored.testTemplateId == session.testTemplateId &&
+                    stored.testTemplateVersion == session.testTemplateVersion &&
+                    stored.testTemplateSnapshot == session.testTemplateSnapshot &&
+                    stored.startedAt == session.startedAt &&
+                    stored.startedElapsedRealtimeNanos == session.startedElapsedRealtimeNanos &&
+                    stored.startedBootId == session.startedBootId &&
+                    stored.startAnchor == session.startAnchor &&
+                    stored.startLogicalFrameCount == session.startLogicalFrameCount &&
+                    stored.startCanObservationCount == session.startCanObservationCount &&
+                    stored.safetyEvidence == session.safetyEvidence &&
+                    stored.safetyAuthorization == session.safetyAuthorization
+            ) { "AndroidDiscoveryCaptureDraft immutable start metadata changed during finalization." }
+            val updated = database.update(
+                "discovery_capture_sessions",
+                ContentValues().apply {
+                    put("state", session.state.name)
+                    put("ended_at", session.endedAt)
+                    put(
+                        "ended_elapsed_realtime_nanos",
+                        requireNotNull(session.endedElapsedRealtimeNanos).toString(),
+                    )
+                    put("ended_boot_id", requireNotNull(session.endedBootId))
+                    putAnchor("end", session.endAnchor)
+                    put("end_logical_frame_count", requireNotNull(session.endLogicalFrameCount))
+                    put("end_can_observation_count", requireNotNull(session.endCanObservationCount))
+                    put("finalization_authority", requireNotNull(session.finalizationAuthority).name)
+                    putSafetyAuthorization("finalization", session.finalizationSafetyAuthorization)
+                },
+                "session_id = ? AND state = ?",
+                arrayOf(session.sessionId, AndroidCaptureDraftState.ACTIVE.name),
+            )
+            check(updated == 1) { "AndroidDiscoveryCaptureDraft finalization did not update exactly one active row." }
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun appendDiscoveryMarker(marker: AndroidDiscoveryMarkerRecord) {
+        marker.validate()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val state = database.query(
+                "discovery_capture_sessions",
+                arrayOf(
+                    "state", "vehicle_scope_id", "vehicle_profile_revision_id", "capture_source_id"
+                ),
+                "session_id = ?",
+                arrayOf(marker.captureSessionId),
+                null,
+                null,
+                null,
+                "1",
+            ).use { cursor ->
+                require(cursor.moveToFirst()) { "AndroidDiscoveryMarkerRecord AndroidDiscoveryCaptureDraft does not exist." }
+                val draftState = AndroidCaptureDraftState.valueOf(cursor.getString(0))
+                val captureScope = DiscoveryEvidenceScope(
+                    vehicleScopeId = cursor.getString(1),
+                    vehicleProfileRevisionId = cursor.getString(2),
+                    sourceId = cursor.getString(3),
+                ).validate()
+                require(marker.safetyAuthorization.sourceId == captureScope.sourceId) {
+                    "Marker PARKED authorization does not match the capture source."
+                }
+                requireCurrentScope(database, captureScope)
+                draftState
+            }
+            require(state == AndroidCaptureDraftState.ACTIVE) {
+                "AndroidDiscoveryMarkerRecord can only be appended to an active AndroidDiscoveryCaptureDraft."
+            }
+            database.insertOrThrow("discovery_event_markers", null, ContentValues().apply {
+                put("marker_id", marker.markerId)
+                put("capture_session_id", marker.captureSessionId)
+                put("event_type", marker.eventType)
+                put("label", marker.label)
+                put("marker_kind", marker.kind.name)
+                putNullable("value_text", marker.value)
+                putNullable("unit", marker.unit)
+                put("observed_at", marker.observedAt)
+                put("elapsed_realtime_nanos", marker.elapsedRealtimeNanos.toString())
+                putAnchor(null, marker.evidenceAnchor)
+                put("observer", marker.observer)
+                putNullable("note", marker.note)
+                putSafetyAuthorization(null, marker.safetyAuthorization)
+            })
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun activeDiscoveryCapture(): PersistedAndroidDiscoveryCapture? = readableDatabase.query(
+        "discovery_capture_sessions",
+        CAPTURE_SESSION_COLUMNS,
+        "state = ?",
+        arrayOf(AndroidCaptureDraftState.ACTIVE.name),
+        null,
+        null,
+        "started_at DESC",
+        "1",
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else persistedDiscoveryCapture(readableDatabase, cursor)
+    }
+
+    @Synchronized
+    fun recentDiscoveryCaptures(
+        limit: Int = 100,
+        scope: DiscoveryEvidenceScope? = null,
+    ): List<PersistedAndroidDiscoveryCapture> {
+        require(limit in 1..1_000)
+        val result = mutableListOf<PersistedAndroidDiscoveryCapture>()
+        readableDatabase.query(
+            "discovery_capture_sessions",
+            CAPTURE_SESSION_COLUMNS,
+            scope?.let {
+                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND capture_source_id = ?"
+            },
+            scope?.queryArguments(),
+            null,
+            null,
+            "started_at DESC",
+            limit.toString(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) result += persistedDiscoveryCapture(readableDatabase, cursor)
+        }
+        return result
+    }
+
+    @Synchronized
+    fun eventMarkers(captureSessionId: String): List<AndroidDiscoveryMarkerRecord> {
+        require(captureSessionId.isNotBlank())
+        val result = mutableListOf<AndroidDiscoveryMarkerRecord>()
+        readableDatabase.query(
+            "discovery_event_markers",
+            arrayOf(
+                "marker_id", "capture_session_id", "event_type", "label", "marker_kind",
+                "value_text", "unit", "observed_at", "elapsed_realtime_nanos", "source_id",
+                "can_session_id", "nearest_source_sequence", "nearest_gateway_monotonic_us",
+                "observer", "note", "safety_authorization_source_id",
+                "safety_authorization_frame_sequence",
+                "safety_authorization_gateway_monotonic_us",
+                "safety_authorization_received_at_ms",
+            ),
+            "capture_session_id = ?",
+            arrayOf(captureSessionId),
+            null,
+            null,
+            "CAST(elapsed_realtime_nanos AS INTEGER), marker_id",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result += AndroidDiscoveryMarkerRecord(
+                    markerId = cursor.getString(0),
+                    captureSessionId = cursor.getString(1),
+                    eventType = cursor.getString(2),
+                    label = cursor.getString(3),
+                    kind = AndroidDiscoveryMarkerKind.valueOf(cursor.getString(4)),
+                    value = cursor.nullableString(5),
+                    unit = cursor.nullableString(6),
+                    observedAt = cursor.getString(7),
+                    elapsedRealtimeNanos = cursor.getString(8).toLong(),
+                    evidenceAnchor = cursor.anchor(9, 10, 11, 12),
+                    observer = cursor.getString(13),
+                    note = cursor.nullableString(14),
+                    safetyAuthorization = cursor.safetyAuthorization(15, 16, 17, 18),
+                ).validate()
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun persistAndroidVehicleCapabilityObservation(snapshot: AndroidVehicleCapabilityObservation): Boolean {
+        snapshot.validate()
+        val scope = DiscoveryEvidenceScope(
+            vehicleScopeId = snapshot.vehicleScopeId,
+            vehicleProfileRevisionId = snapshot.vehicleProfileRevisionId,
+            sourceId = snapshot.sourceId,
+        ).validate()
+        val snapshotJson = gson.toJson(snapshot)
+        val fingerprintJson = gson.toJson(
+            snapshot.copy(
+                snapshotId = "00000000-0000-0000-0000-000000000000",
+                capturedAt = "1970-01-01T00:00:00Z",
+                safetyAuthorization = snapshot.safetyAuthorization.copy(
+                    healthFrameSequence = 0UL,
+                    healthGatewayMonotonicMicroseconds = 0UL,
+                    receivedAtEpochMillis = 0L,
+                ),
+            )
+        )
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            // This is the final authority check inside the same transaction as the append. An
+            // Activity-level check cannot prevent a profile revision changing in between calls.
+            requireCurrentScope(database, scope)
+            val inserted = database.insertWithOnConflict(
+                "android_capability_observations",
+                null,
+                ContentValues().apply {
+                    put("snapshot_id", snapshot.snapshotId)
+                    put("snapshot_fingerprint", EvidenceBundles.sha256(fingerprintJson.toByteArray()))
+                    put("snapshot_json", snapshotJson)
+                    put("captured_at", snapshot.capturedAt)
+                },
+                SQLiteDatabase.CONFLICT_IGNORE,
+            ) != -1L
+            database.setTransactionSuccessful()
+            return inserted
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun recentAndroidVehicleCapabilityObservations(
+        limit: Int = 25,
+        scope: DiscoveryEvidenceScope? = null,
+    ): List<AndroidVehicleCapabilityObservation> {
+        require(limit in 1..500)
+        val result = mutableListOf<AndroidVehicleCapabilityObservation>()
+        readableDatabase.query(
+            "android_capability_observations",
+            arrayOf("snapshot_json"),
+            null,
+            null,
+            null,
+            null,
+            "captured_at DESC",
+            if (scope == null) limit.toString() else "500",
+        ).use { cursor ->
+            while (cursor.moveToNext() && result.size < limit) {
+                val observation = gson.fromJson(
+                    cursor.getString(0),
+                    AndroidVehicleCapabilityObservation::class.java,
+                ).validate()
+                if (scope == null || (
+                        observation.vehicleScopeId == scope.vehicleScopeId &&
+                            observation.vehicleProfileRevisionId == scope.vehicleProfileRevisionId &&
+                            observation.sourceId == scope.sourceId
+                        )
+                ) result += observation
+            }
+        }
+        return result
+    }
+
+    private fun captureSessionStartValues(session: AndroidDiscoveryCaptureDraft): ContentValues = ContentValues().apply {
+        put("session_id", session.sessionId)
+        put("vehicle_scope_id", session.vehicleScopeId)
+        put("vehicle_profile_revision_id", session.vehicleProfileRevisionId)
+        put("capture_source_id", session.sourceId)
+        put("test_template_id", session.testTemplateId)
+        put("test_template_version", session.testTemplateVersion)
+        val templateJson = gson.toJson(session.testTemplateSnapshot)
+        put("test_template_snapshot_json", templateJson)
+        put("test_template_snapshot_sha256", EvidenceBundles.sha256(templateJson.toByteArray()))
+        put("state", session.state.name)
+        put("started_at", session.startedAt)
+        put("started_elapsed_realtime_nanos", session.startedElapsedRealtimeNanos.toString())
+        put("started_boot_id", session.startedBootId)
+        putAnchor("start", session.startAnchor)
+        put("start_logical_frame_count", session.startLogicalFrameCount)
+        put("start_can_observation_count", session.startCanObservationCount)
+        put("safety_evidence", session.safetyEvidence.name)
+        put("safety_authorization_source_id", session.safetyAuthorization.sourceId)
+        put("safety_authorization_frame_sequence", session.safetyAuthorization.healthFrameSequence.toString())
+        put(
+            "safety_authorization_gateway_monotonic_us",
+            session.safetyAuthorization.healthGatewayMonotonicMicroseconds.toString(),
+        )
+        put("safety_authorization_received_at_ms", session.safetyAuthorization.receivedAtEpochMillis)
+    }
+
+    private fun AndroidDiscoveryCaptureDraft.evidenceScope(): DiscoveryEvidenceScope =
+        DiscoveryEvidenceScope(
+            vehicleScopeId = vehicleScopeId,
+            vehicleProfileRevisionId = vehicleProfileRevisionId,
+            sourceId = sourceId,
+        ).validate()
+
+    private fun captureSessionById(database: SQLiteDatabase, sessionId: String): AndroidDiscoveryCaptureDraft? =
+        database.query(
+            "discovery_capture_sessions",
+            CAPTURE_SESSION_COLUMNS,
+            "session_id = ?",
+            arrayOf(sessionId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor -> if (!cursor.moveToFirst()) null else captureSession(cursor) }
+
+    private fun persistedDiscoveryCapture(
+        database: SQLiteDatabase,
+        cursor: Cursor,
+    ): PersistedAndroidDiscoveryCapture {
+        val session = captureSession(cursor)
+        val eventCount = database.rawQuery(
+            "SELECT COUNT(*) FROM discovery_event_markers WHERE capture_session_id = ?",
+            arrayOf(session.sessionId),
+        ).use { count -> check(count.moveToFirst()); count.getInt(0) }
+        return PersistedAndroidDiscoveryCapture(session, eventCount)
+    }
+
+    private fun captureSession(cursor: Cursor): AndroidDiscoveryCaptureDraft =
+        gson.fromJson(cursor.getString(6), AndroidDiscoveryTestTemplate::class.java).let { template ->
+            val templateJson = gson.toJson(template.validate())
+            require(EvidenceBundles.sha256(templateJson.toByteArray()) == cursor.getString(7)) {
+                "Persisted Discovery test-template snapshot hash does not match."
+            }
+            AndroidDiscoveryCaptureDraft(
+                sessionId = cursor.getString(0),
+                vehicleScopeId = cursor.getString(1),
+                vehicleProfileRevisionId = cursor.getString(2),
+                sourceId = cursor.getString(3),
+                testTemplateId = cursor.getString(4),
+                testTemplateVersion = cursor.getString(5),
+                testTemplateSnapshot = template,
+                state = AndroidCaptureDraftState.valueOf(cursor.getString(8)),
+                startedAt = cursor.getString(9),
+                startedElapsedRealtimeNanos = cursor.getString(10).toLong(),
+                startedBootId = cursor.getString(11),
+                endedAt = cursor.nullableString(12),
+                endedElapsedRealtimeNanos = cursor.nullableString(13)?.toLong(),
+                endedBootId = cursor.nullableString(14),
+                startAnchor = cursor.anchor(15, 16, 17, 18),
+                endAnchor = cursor.anchor(19, 20, 21, 22),
+                startLogicalFrameCount = cursor.getLong(23),
+                startCanObservationCount = cursor.getLong(24),
+                endLogicalFrameCount = cursor.nullableLong(25),
+                endCanObservationCount = cursor.nullableLong(26),
+                safetyEvidence = AndroidDiscoverySafetyEvidence.valueOf(cursor.getString(27)),
+                safetyAuthorization = AndroidDiscoverySafetyAuthorization(
+                    sourceId = cursor.getString(28),
+                    healthFrameSequence = cursor.getString(29).toULong(),
+                    healthGatewayMonotonicMicroseconds = cursor.getString(30).toULong(),
+                    receivedAtEpochMillis = cursor.getLong(31),
+                ),
+                finalizationAuthority = cursor.nullableString(32)?.let(
+                    AndroidCaptureFinalizationAuthority::valueOf
+                ),
+                finalizationSafetyAuthorization = cursor.nullableSafetyAuthorization(33, 34, 35, 36),
+            ).validate()
+        }
+
+    private fun ContentValues.putSafetyAuthorization(
+        prefix: String?,
+        authorization: AndroidDiscoverySafetyAuthorization?,
+    ) {
+        val base = prefix?.let { "${it}_authorization" } ?: "safety_authorization"
+        if (authorization == null) {
+            putNull("${base}_source_id")
+            putNull("${base}_frame_sequence")
+            putNull("${base}_gateway_monotonic_us")
+            putNull("${base}_received_at_ms")
+        } else {
+            authorization.validate()
+            put("${base}_source_id", authorization.sourceId)
+            put("${base}_frame_sequence", authorization.healthFrameSequence.toString())
+            put("${base}_gateway_monotonic_us", authorization.healthGatewayMonotonicMicroseconds.toString())
+            put("${base}_received_at_ms", authorization.receivedAtEpochMillis)
+        }
+    }
+
+    private fun Cursor.safetyAuthorization(
+        sourceIndex: Int,
+        sequenceIndex: Int,
+        monotonicIndex: Int,
+        receivedAtIndex: Int,
+    ): AndroidDiscoverySafetyAuthorization = AndroidDiscoverySafetyAuthorization(
+        sourceId = getString(sourceIndex),
+        healthFrameSequence = getString(sequenceIndex).toULong(),
+        healthGatewayMonotonicMicroseconds = getString(monotonicIndex).toULong(),
+        receivedAtEpochMillis = getLong(receivedAtIndex),
+    ).validate()
+
+    private fun Cursor.nullableSafetyAuthorization(
+        sourceIndex: Int,
+        sequenceIndex: Int,
+        monotonicIndex: Int,
+        receivedAtIndex: Int,
+    ): AndroidDiscoverySafetyAuthorization? = if (isNull(sourceIndex)) {
+        require(isNull(sequenceIndex) && isNull(monotonicIndex) && isNull(receivedAtIndex)) {
+            "Partial Discovery PARKED authorization lineage is invalid."
+        }
+        null
+    } else {
+        safetyAuthorization(sourceIndex, sequenceIndex, monotonicIndex, receivedAtIndex)
+    }
+
+    private fun ContentValues.putAnchor(prefix: String?, anchor: AndroidDiscoveryEvidenceAnchor?) {
+        val sourceColumn = prefix?.let { "${it}_source_id" } ?: "source_id"
+        val sessionColumn = prefix?.let { "${it}_can_session_id" } ?: "can_session_id"
+        val sequenceColumn = prefix?.let { "${it}_source_sequence" } ?: "nearest_source_sequence"
+        val monotonicColumn = prefix?.let { "${it}_gateway_monotonic_us" }
+            ?: "nearest_gateway_monotonic_us"
+        if (anchor == null) {
+            putNull(sourceColumn)
+            putNull(sessionColumn)
+            putNull(sequenceColumn)
+            putNull(monotonicColumn)
+        } else {
+            anchor.validate()
+            put(sourceColumn, anchor.sourceId)
+            put(sessionColumn, anchor.canSessionId.toString())
+            put(sequenceColumn, anchor.sourceSequence.toString())
+            put(monotonicColumn, anchor.gatewayMonotonicMicroseconds.toString())
+        }
+    }
+
+    private fun ContentValues.putNullable(column: String, value: String?) {
+        if (value == null) putNull(column) else put(column, value)
+    }
+
+    private fun Cursor.anchor(
+        sourceIndex: Int,
+        sessionIndex: Int,
+        sequenceIndex: Int,
+        monotonicIndex: Int,
+    ): AndroidDiscoveryEvidenceAnchor? {
+        val source = nullableString(sourceIndex) ?: return null
+        return AndroidDiscoveryEvidenceAnchor(
+            sourceId = source,
+            canSessionId = getString(sessionIndex).toUInt(),
+            sourceSequence = getString(sequenceIndex).toULong(),
+            gatewayMonotonicMicroseconds = getString(monotonicIndex).toULong(),
+        ).validate()
+    }
+
+    private fun Cursor.nullableString(index: Int): String? =
+        if (isNull(index)) null else getString(index)
+
+    private fun Cursor.nullableLong(index: Int): Long? =
+        if (isNull(index)) null else getLong(index)
+
+    @Synchronized
+    fun recentPortableFrames(
+        scope: DiscoveryEvidenceScope,
+        limit: Int = 20_000,
+    ): List<PortableEvidenceRecord> {
+        scope.validate()
         require(limit in 1..100_000)
         val records = mutableListOf<PortableEvidenceRecord>()
         readableDatabase.query(
@@ -546,7 +1443,12 @@ class EvidenceDatabase private constructor(
                 "protocol_major", "protocol_minor", "message_type", "flags", "ingested_at",
                 "envelope_sha256", "envelope",
             ),
-            null, null, null, null, "id DESC", limit.toString(),
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            scope.queryArguments(),
+            null,
+            null,
+            "id DESC",
+            limit.toString(),
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 val envelope = cursor.getBlob(10)
@@ -569,14 +1471,26 @@ class EvidenceDatabase private constructor(
     }
 
     @Synchronized
-    fun importBundle(bundle: ImportedEvidenceBundle, importedAt: Instant = Instant.now()): Int {
+    fun importBundle(
+        bundle: ImportedEvidenceBundle,
+        scope: DiscoveryEvidenceScope,
+        importedAt: Instant = Instant.now(),
+    ): Int {
+        scope.validate()
         val database = writableDatabase
         database.beginTransaction()
         try {
+            requireCurrentScope(database, scope)
             val receiptExists = database.query(
                 "import_receipts", arrayOf("bundle_id"),
-                "bundle_id = ? AND manifest_sha256 = ?",
-                arrayOf(bundle.manifest.bundleId, bundle.manifestSha256),
+                "bundle_id = ? AND manifest_sha256 = ? AND vehicle_scope_id = ? " +
+                    "AND vehicle_profile_revision_id = ?",
+                arrayOf(
+                    bundle.manifest.bundleId,
+                    bundle.manifestSha256,
+                    scope.vehicleScopeId,
+                    scope.vehicleProfileRevisionId,
+                ),
                 null, null, null, "1",
             ).use { it.moveToFirst() }
             if (receiptExists) {
@@ -597,7 +1511,15 @@ class EvidenceDatabase private constructor(
                     throw IllegalArgumentException("Portable record metadata does not match its VHOS envelope.")
                 }
                 ensureImportedSource(database, record.sourceId, role, importedAt)
+                if (role == DeviceRole.OBD_CAN) {
+                    require(record.sourceId == scope.sourceId) {
+                        "Imported OBD/CAN evidence source does not match the selected vehicle gateway."
+                    }
+                }
+                val recordScope = scope.copy(sourceId = record.sourceId).validate()
                 val values = ContentValues().apply {
+                    put("vehicle_scope_id", recordScope.vehicleScopeId)
+                    put("vehicle_profile_revision_id", recordScope.vehicleProfileRevisionId)
                     put("source_id", record.sourceId)
                     put("source_role", role.wireValue)
                     put("source_sequence", record.sourceSequence)
@@ -631,7 +1553,7 @@ class EvidenceDatabase private constructor(
                         }
                         insertCanObservation(
                             database,
-                            record.sourceId,
+                            recordScope,
                             observation,
                             evidenceIngestedAt,
                         )
@@ -641,6 +1563,8 @@ class EvidenceDatabase private constructor(
             database.insertOrThrow("import_receipts", null, ContentValues().apply {
                 put("bundle_id", bundle.manifest.bundleId)
                 put("manifest_sha256", bundle.manifestSha256)
+                put("vehicle_scope_id", scope.vehicleScopeId)
+                put("vehicle_profile_revision_id", scope.vehicleProfileRevisionId)
                 put("imported_at", importedAt.toString())
                 put("record_count", bundle.records.size)
             })
@@ -681,7 +1605,24 @@ class EvidenceDatabase private constructor(
 
     companion object {
         internal const val DATABASE_NAME = "vhos-evidence.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 5
+        private val CAPTURE_SESSION_COLUMNS = arrayOf(
+            "session_id", "vehicle_scope_id", "vehicle_profile_revision_id", "capture_source_id",
+            "test_template_id", "test_template_version", "test_template_snapshot_json",
+            "test_template_snapshot_sha256", "state", "started_at",
+            "started_elapsed_realtime_nanos", "started_boot_id", "ended_at",
+            "ended_elapsed_realtime_nanos", "ended_boot_id", "start_source_id",
+            "start_can_session_id", "start_source_sequence", "start_gateway_monotonic_us",
+            "end_source_id", "end_can_session_id", "end_source_sequence",
+            "end_gateway_monotonic_us", "start_logical_frame_count",
+            "start_can_observation_count", "end_logical_frame_count",
+            "end_can_observation_count", "safety_evidence", "safety_authorization_source_id",
+            "safety_authorization_frame_sequence", "safety_authorization_gateway_monotonic_us",
+            "safety_authorization_received_at_ms", "finalization_authority",
+            "finalization_authorization_source_id", "finalization_authorization_frame_sequence",
+            "finalization_authorization_gateway_monotonic_us",
+            "finalization_authorization_received_at_ms",
+        )
         private val INSTANCE_LOCK = Any()
         // SQLiteOpenHelper retains only the application context supplied at construction.
         @SuppressLint("StaticFieldLeak")
@@ -751,7 +1692,10 @@ class EvidenceDatabase private constructor(
         }
 
         internal fun closeForInstrumentationTests() {
-            synchronized(INSTANCE_LOCK) { instance?.close() }
+            synchronized(INSTANCE_LOCK) {
+                instance?.close()
+                instance = null
+            }
         }
     }
 }

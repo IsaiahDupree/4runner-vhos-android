@@ -2,18 +2,22 @@
 
 ## Install on the head unit
 
-### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.6/app-debug.apk)
+### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.13/app-debug.apk)
 
-Current public development build: **0.1.0-dev.6** (`app-debug.apk`, 2,697,891 bytes). The link above
+Current public development build: **0.1.0-dev.13** (`app-debug.apk`, 10,855,119 bytes; SHA-256
+`2fb488ccdf8a6e4dff8606602a81f032cb36a3c61fe0a6a86247ed7974f7e3b2`). The link above
 downloads the installer directly and does not require a GitHub account.
 
-Current source candidate: **0.1.0-dev.12**. It adds an evidence-ranked validation-mission planner to
-the SHA-pinned, fail-closed Toyota signal hypothesis surface. The planner uses retained target
-activity, research lineage, checksum candidates, and raw-field relationships to say what to validate
-next while explicitly keeping priority separate from confidence. Cross-model transforms remain
-unverified, zero definitions are accepted, and no candidate can update owner health or the digital
-twin. It is not the public installer until its release artifact and catalog entry are signed and
-published.
+This release adds a landscape Discovery Engineering workspace
+backed by current validated gateway state and the encrypted evidence store: vehicle/source-scoped overview, supported
+standard values, 15 versioned test procedures, durable capture drafts and event markers, candidate
+review, a closed promotion registry, evidence progress, and production-path replay. Capture, marker,
+test, capability-save, and normal completion controls require a fresh validated gateway-health
+`PARKED` report and retain the exact authorizing health-frame lineage;
+each mutation re-reads the latest synchronous runtime state rather than trusting a delayed UI render,
+and live bus status requires a fresh validated `RAW_CAN_FRAME` receipt rather than a cumulative counter;
+unknown, moving, stale, and degraded states fail closed. Android operational records remain
+explicitly separate from the portable iPhone contracts until a checksummed archive mapping exists.
 
 While the vehicle is parked:
 
@@ -23,7 +27,7 @@ While the vehicle is parked:
 4. Tap **Install**, then **Open**.
 
 [Open the public Release Hub](https://isaiahdupree.github.io/4runner-vhos-release-hub/) ·
-[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.6)
+[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.13)
 
 ## Installed in the 4Runner
 
@@ -56,6 +60,12 @@ The first vertical slice provides:
   listen-only bytes while keeping production display, automatic promotion, and digital-twin writes blocked;
 - a ranked **NEXT VALIDATION MISSIONS** surface that converts real target activity and source
   lineage into the next controlled experiment without treating research priority as signal confidence;
+- a three-pane **DISCOVERY ENGINEERING** workspace with real persisted overview, versioned test
+  library, immutable-start capture drafts, synchronized event/measurement markers, Candidate Inbox,
+  closed Signal Registry, progress counts, and Replay Lab;
+- a centralized engineering safety gate that requires a current validated gateway-health `PARKED`
+  report, retains its source/sequence/monotonic lineage, and rejects unknown, moving, stale, future,
+  degraded, speed-zero, and owner-asserted states;
 - a read-only **HISTORICAL REPLAY • NOT LIVE** surface that replays persisted real CAN evidence
   through the production envelope/stream/CAN decoders at source time or full-speed ×20 load;
 - self-resynchronizing frame decoding with explicit corruption, discarded-byte, and recovery
@@ -71,8 +81,10 @@ The first vertical slice provides:
   timing-belt applicability guard;
 - a 22-system whole-vehicle health map that begins entirely `UNKNOWN / UNKNOWN` and requires
   immutable evidence before showing any health state;
-- a non-destructive SQLite schema-v2 migration and owner-controlled versioned digital-twin JSON
-  export;
+- non-destructive SQLCipher schema migrations through v5, including immutable
+  vehicle/profile/source bindings on raw logical/CAN evidence, scoped Android-internal Discovery
+  captures/markers/capability observations, fail-closed legacy quarantine, and owner-controlled
+  versioned digital-twin JSON export;
 - SQLCipher page encryption with a Keystore-wrapped random database passphrase, deterministic
   interrupted-migration recovery, and fail-closed evidence opening;
 - direct reconnect to the last CRC-handshake-validated gateway before any scan;
@@ -148,3 +160,6 @@ are documented in
 The encrypted local truth store, exact plaintext migration and recovery state machine, and remaining
 physical-device acceptance gate are documented in
 [docs/ENCRYPTED-EVIDENCE-STORE.md](docs/ENCRYPTED-EVIDENCE-STORE.md).
+The first Android Discovery workspace, deterministic PARKED gate, SQLCipher draft/marker lifecycle,
+candidate authority, replay boundary, and portable-contract mapping boundary are documented in
+[docs/DISCOVERY-ENGINEERING-WORKSPACE.md](docs/DISCOVERY-ENGINEERING-WORKSPACE.md).

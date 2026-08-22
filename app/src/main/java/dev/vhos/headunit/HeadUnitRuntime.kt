@@ -6,11 +6,18 @@ import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.atomic.AtomicBoolean
 
 object HeadUnitRuntime {
     private val main = Handler(Looper.getMainLooper())
     private val observers = CopyOnWriteArraySet<(HeadUnitSnapshot) -> Unit>()
+    private val deliveryScheduled = AtomicBoolean(false)
     @Volatile private var current = HeadUnitSnapshot()
+    private val deliverLatest = Runnable {
+        deliveryScheduled.set(false)
+        val value = current
+        observers.forEach { it(value) }
+    }
 
     fun snapshot(): HeadUnitSnapshot = current
 
@@ -43,7 +50,10 @@ object HeadUnitRuntime {
 
     private fun update(transform: (HeadUnitSnapshot) -> HeadUnitSnapshot) {
         synchronized(this) { current = transform(current) }
-        val value = current
-        main.post { observers.forEach { it(value) } }
+        if (deliveryScheduled.compareAndSet(false, true)) {
+            main.postDelayed(deliverLatest, DELIVERY_INTERVAL_MILLIS)
+        }
     }
+
+    private const val DELIVERY_INTERVAL_MILLIS = 100L
 }

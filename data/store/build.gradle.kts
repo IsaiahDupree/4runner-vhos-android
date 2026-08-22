@@ -9,6 +9,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:discovery"))
     implementation(project(":core:digitaltwin"))
     implementation(project(":core:model"))
     implementation(project(":core:protocol"))

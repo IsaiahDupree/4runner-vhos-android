@@ -3,6 +3,7 @@ package dev.vhos.protocol
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import dev.vhos.model.DeviceRole
+import dev.vhos.model.VehicleMotion
 
 data class GatewayHandshake(
     val contract: String,
@@ -22,7 +23,7 @@ data class GatewayHealth(
     val contract: String,
     @SerializedName("contract_version") val contractVersion: String,
     @SerializedName("observed_at") val observedAt: String,
-    @SerializedName("vehicle_motion") val vehicleMotion: String,
+    @SerializedName("vehicle_motion") val vehicleMotion: VehicleMotion,
     @SerializedName("received_frames") val receivedFrames: Long,
     @SerializedName("dropped_frames") val droppedFrames: Long,
     @SerializedName("bus_error_count") val busErrorCount: Long,
@@ -112,6 +113,9 @@ object PayloadContracts {
         requireContract(health.contract, "gateway.health")
         if (health.contractVersion != "1.0.0") {
             throw PayloadException("Unsupported health contract ${health.contractVersion}.")
+        }
+        if (health.vehicleMotion !in VehicleMotion.entries) {
+            throw PayloadException("Gateway health vehicle motion is invalid.")
         }
         if (!health.listenOnly) throw PayloadException("Live health no longer proves listen-only operation.")
         return health

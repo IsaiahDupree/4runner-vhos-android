@@ -9,6 +9,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:model"))
     implementation(project(":core:protocol"))
     implementation("com.google.code.gson:gson:2.14.0")
     testImplementation("com.google.code.gson:gson:2.14.0")

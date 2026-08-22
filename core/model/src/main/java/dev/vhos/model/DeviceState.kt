@@ -28,6 +28,12 @@ enum class ConnectionPhase(val displayName: String) {
 
 enum class IndicatorLevel { PASS, ACTIVE, WAIT, CHECK, BLOCKED }
 
+/**
+ * Motion authority reported by a validated gateway-health frame. UNKNOWN is the fail-closed
+ * default and must never be treated as equivalent to zero vehicle speed.
+ */
+enum class VehicleMotion { UNKNOWN, PARKED, MOVING }
+
 data class StandardObdReading(
     val ecuAddress: String,
     val pid: Int,
@@ -58,10 +64,16 @@ data class DeviceSnapshot(
     val protocolFailures: Long = 0,
     val reconnects: Long = 0,
     val vehicleFrames: Long = 0,
+    /** Receipt time of the newest validated live RAW_CAN frame; retained log chunks do not update it. */
+    val lastVehicleFrameAtEpochMs: Long? = null,
     val busErrors: Long = 0,
     val busOffEvents: Long = 0,
     val listenOnly: Boolean? = null,
     val bitrateBps: Long? = null,
+    val vehicleMotion: VehicleMotion = VehicleMotion.UNKNOWN,
+    val vehicleMotionObservedAtEpochMs: Long? = null,
+    val vehicleMotionFrameSequence: ULong? = null,
+    val vehicleMotionGatewayMonotonicMicroseconds: ULong? = null,
     val platformErrorCode: Int? = null,
     val transportErrorName: String? = null,
     val recoveryAttempt: Int = 0,

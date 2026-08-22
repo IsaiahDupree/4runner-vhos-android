@@ -53,6 +53,7 @@ data class HistoricalReplayReport(
  */
 object HistoricalCanReplay {
     private val defaultFragmentSizes = intArrayOf(1, 3, 20, 244, 5, 509, 64, 17, 1_024)
+    private const val MAX_EXPECTED_REPLAY_LAG = 4_096
 
     fun run(
         input: List<DiscoveryObservation>,
@@ -94,12 +95,33 @@ object HistoricalCanReplay {
         }
         val captureOffsets = captureOffsets(ordered)
         val sourceDuration = captureOffsets.last()
-        val expected = mutableListOf<DiscoveryObservation>()
-        val decoded = mutableListOf<DiscoveryObservation>()
+        val totalUnitsLong = ordered.size.toLong() * repeat.toLong()
+        require(totalUnitsLong <= Int.MAX_VALUE) { "Replay record count exceeds the supported bound." }
+        val expectedQueue = java.util.ArrayDeque<DiscoveryObservation>()
         val decoder = FrameStreamDecoder()
         var faultedFrames = 0
         var cancelled = false
-        val totalUnits = ordered.size * repeat
+        var expectedRecords = 0
+        var decodedRecords = 0
+        var exactRecordOrderAndPayload = true
+        val totalUnits = totalUnitsLong.toInt()
+
+        fun consume(captureOffset: ULong): (DiscoveryObservation) -> Unit = { item ->
+            decodedRecords++
+            val expected = expectedQueue.pollFirst()
+            if (expected == null || expected != item) exactRecordOrderAndPayload = false
+            onRecord(
+                HistoricalReplayProgress(
+                    recordIndex = decodedRecords,
+                    totalExpectedRecords = totalUnits,
+                    sourceId = item.sourceId,
+                    record = item.observation,
+                    sourceCaptureOffsetMicroseconds = captureOffset,
+                    decoderRecoveries = decoder.recoveryCount,
+                    decoderDiscardedBytes = decoder.discardedByteCount,
+                )
+            )
+        }
 
         run replayLoop@{
             var unitIndex = 0
@@ -119,7 +141,10 @@ object HistoricalCanReplay {
                     ).encode()
                     val faultThisFrame = fault != ReplayFaultProfile.CLEAN &&
                         unitIndex % faultInterval == 0 && unitIndex < totalUnits
-                    if (!faultThisFrame) expected += source else faultedFrames++
+                    if (!faultThisFrame) {
+                        expectedQueue.addLast(source)
+                        expectedRecords++
+                    } else faultedFrames++
 
                     when {
                         !faultThisFrame -> feed(
@@ -127,10 +152,10 @@ object HistoricalCanReplay {
                             fragmentSizes,
                             decoder,
                             sourceByWireIdentity,
-                            decoded,
-                            totalUnits,
-                            captureOffsets[recordIndex] + repetition.toULong() * (sourceDuration + 1UL),
-                            onRecord,
+                            consume(
+                                captureOffsets[recordIndex] +
+                                    repetition.toULong() * (sourceDuration + 1UL)
+                            ),
                         )
                         fault == ReplayFaultProfile.DROP_FRAGMENT -> {
                             val start = minOf(GatewayFrame.HEADER_LENGTH + 5, wire.size - 2)
@@ -138,8 +163,8 @@ object HistoricalCanReplay {
                             val damaged = wire.copyOfRange(0, start) +
                                 wire.copyOfRange(start + width, wire.size)
                             feed(
-                                damaged, fragmentSizes, decoder, sourceByWireIdentity, decoded,
-                                totalUnits, captureOffsets[recordIndex], onRecord,
+                                damaged, fragmentSizes, decoder, sourceByWireIdentity,
+                                consume(captureOffsets[recordIndex]),
                             )
                         }
                         fault == ReplayFaultProfile.CORRUPT_PAYLOAD -> {
@@ -148,33 +173,36 @@ object HistoricalCanReplay {
                                 bytes[offset] = (bytes[offset].toInt() xor 0x80).toByte()
                             }
                             feed(
-                                damaged, fragmentSizes, decoder, sourceByWireIdentity, decoded,
-                                totalUnits, captureOffsets[recordIndex], onRecord,
+                                damaged, fragmentSizes, decoder, sourceByWireIdentity,
+                                consume(captureOffsets[recordIndex]),
                             )
                         }
                         else -> {
                             val split = minOf(GatewayFrame.HEADER_LENGTH + 5, wire.lastIndex)
                             feed(
                                 wire.copyOfRange(0, split), fragmentSizes, decoder,
-                                sourceByWireIdentity, decoded, totalUnits,
-                                captureOffsets[recordIndex], onRecord,
+                                sourceByWireIdentity, consume(captureOffsets[recordIndex]),
                             )
                             decoder.resetBufferPreservingDiagnostics()
                         }
+                    }
+                    check(expectedQueue.size <= MAX_EXPECTED_REPLAY_LAG) {
+                        "Replay decoder lag exceeded the bounded comparison window."
                     }
                 }
             }
         }
 
-        val exact = decoded == expected
+        val exact = exactRecordOrderAndPayload && expectedQueue.isEmpty() &&
+            decodedRecords == expectedRecords
         return HistoricalReplayReport(
             label = HISTORICAL_REPLAY_LABEL,
             sourceClassification = HISTORICAL_REPLAY_SOURCE,
             inputRecords = totalUnits,
             repeat = repeat,
-            expectedRecordsAfterFaults = expected.size,
-            decodedRecords = decoded.size,
-            expectedMissingRecords = totalUnits - expected.size,
+            expectedRecordsAfterFaults = expectedRecords,
+            decodedRecords = decodedRecords,
+            expectedMissingRecords = totalUnits - expectedRecords,
             faultedWireFrames = faultedFrames,
             sessions = ordered.map { it.sourceId to it.observation.sessionId }.toSet().size,
             uniqueIdentifiers = ordered.map {
@@ -194,10 +222,7 @@ object HistoricalCanReplay {
         fragmentSizes: IntArray,
         decoder: FrameStreamDecoder,
         sourceByWireIdentity: Map<Pair<UInt, ULong>, String>,
-        decoded: MutableList<DiscoveryObservation>,
-        totalExpectedRecords: Int,
-        captureOffset: ULong,
-        onRecord: (HistoricalReplayProgress) -> Unit,
+        consume: (DiscoveryObservation) -> Unit,
     ) {
         var offset = 0
         var fragment = 0
@@ -209,18 +234,7 @@ object HistoricalCanReplay {
                         sourceByWireIdentity[observation.sessionId to observation.sourceSequence]
                     ) { "Decoded replay record has no immutable source identity." }
                     val item = DiscoveryObservation(sourceId, observation)
-                    decoded += item
-                    onRecord(
-                        HistoricalReplayProgress(
-                            recordIndex = decoded.size,
-                            totalExpectedRecords = totalExpectedRecords,
-                            sourceId = sourceId,
-                            record = observation,
-                            sourceCaptureOffsetMicroseconds = captureOffset,
-                            decoderRecoveries = decoder.recoveryCount,
-                            decoderDiscardedBytes = decoder.discardedByteCount,
-                        )
-                    )
+                    consume(item)
                 }
             }
             offset += count

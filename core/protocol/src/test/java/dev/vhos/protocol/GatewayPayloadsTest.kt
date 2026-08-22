@@ -1,6 +1,7 @@
 package dev.vhos.protocol
 
 import dev.vhos.model.DeviceRole
+import dev.vhos.model.VehicleMotion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -9,6 +10,8 @@ import org.junit.Test
 class GatewayPayloadsTest {
     private val validHandshake =
         """{"active_config_id":"passive","active_config_version":"0.4.0","capabilities":["capture.passive","evidence.export"],"contract":"gateway.handshake","contract_version":"1.0.0","firmware_build_id":"abc","firmware_version":"0.1.0","gateway_id":"esp32-test","hardware_revision":"MrDIY","listen_only":true,"protocol_version":"1.0.0"}"""
+    private val validHealth =
+        """{"contract":"gateway.health","contract_version":"1.0.0","observed_at":"2026-08-22T00:00:00Z","vehicle_motion":"PARKED","received_frames":12,"dropped_frames":0,"bus_error_count":0,"bus_off_count":0,"storage_free_bytes":1024,"capture_active":false,"listen_only":true,"can_bitrate_bps":500000,"can_passive_lock":true,"can_scan_state":"LOCKED_500K"}"""
 
     @Test
     fun validatesPhysicalObdIdentityAndSafetyContract() {
@@ -31,6 +34,22 @@ class GatewayPayloadsTest {
         val incomplete = validHandshake.replace("\"gateway_id\":\"esp32-test\",", "")
         assertThrows(PayloadException::class.java) {
             PayloadContracts.decodeAndValidateHandshake(incomplete.toByteArray())
+        }
+    }
+
+    @Test
+    fun decodesDeterministicParkedAuthorityFromValidatedHealth() {
+        assertEquals(
+            VehicleMotion.PARKED,
+            PayloadContracts.decodeHealth(validHealth.toByteArray()).vehicleMotion,
+        )
+    }
+
+    @Test
+    fun rejectsUnknownMotionWireValuesInsteadOfWideningSafetyAuthority() {
+        val invalid = validHealth.replace("\"PARKED\"", "\"STOPPED\"")
+        assertThrows(PayloadException::class.java) {
+            PayloadContracts.decodeHealth(invalid.toByteArray())
         }
     }
 }

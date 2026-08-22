@@ -31,6 +31,7 @@ import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.IndicatorLevel
 import dev.vhos.model.StandardObdReading
+import dev.vhos.model.VehicleMotion
 import dev.vhos.protocol.FrameStreamDecoder
 import dev.vhos.protocol.GatewayFrame
 import dev.vhos.protocol.J1979Accumulator
@@ -547,11 +548,16 @@ private class GatewayGattConnection(
     private var logicalFrames = 0L
     private var persistedFrames = 0L
     private var vehicleFrames = 0L
+    private var lastVehicleFrameAtEpochMs: Long? = null
     private var crcFailures = 0L
     private var protocolFailures = 0L
     private var busErrors = 0L
     private var busOffEvents = 0L
     private var bitrateBps: Long? = null
+    private var vehicleMotion = VehicleMotion.UNKNOWN
+    private var vehicleMotionObservedAtEpochMs: Long? = null
+    private var vehicleMotionFrameSequence: ULong? = null
+    private var vehicleMotionGatewayMonotonicMicroseconds: ULong? = null
     private var lastFrameAt: Long? = null
     private var reconnectCount = 0L
     private var descriptorSecurityRetries = 0
@@ -870,7 +876,9 @@ private class GatewayGattConnection(
                     validatedAt = Instant.now().toString(),
                 )
             )
-            if (database.persistFrame(validated.sourceId, validated.role, frame, frame.encode())) persistedFrames++
+            database.resolveEvidenceScope(validated.sourceId)?.let { scope ->
+                if (database.persistFrame(scope, validated.role, frame, frame.encode())) persistedFrames++
+            }
             callback.validated(device.address, validated)
             emit(ConnectionPhase.STREAMING, IndicatorLevel.PASS, "Encrypted VHOS contract active; waiting for live vehicle evidence.")
             return
@@ -879,7 +887,10 @@ private class GatewayGattConnection(
             protocolFailures++
             return fail("Evidence arrived before a validated gateway handshake.")
         }
-        if (database.persistFrame(source.sourceId, source.role, frame, frame.encode())) persistedFrames++
+        val evidenceScope = database.resolveEvidenceScope(source.sourceId)
+        evidenceScope?.let { scope ->
+            if (database.persistFrame(scope, source.role, frame, frame.encode())) persistedFrames++
+        }
         when (frame.messageType) {
             MessageType.RAW_CAN_FRAME, MessageType.CAPTURE_LOG_CHUNK -> {
                 val observations = try {
@@ -892,9 +903,14 @@ private class GatewayGattConnection(
                     if (!observation.listenOnly) {
                         return fail("CAN evidence does not retain listen-only proof.")
                     }
-                    val inserted = database.persistCanObservation(source.sourceId, observation)
+                    val inserted = evidenceScope?.let { database.persistCanObservation(it, observation) } ?: false
                     if (inserted && frame.messageType == MessageType.RAW_CAN_FRAME) vehicleFrames++
                     bitrateBps = observation.bitrateBps.toLong()
+                }
+                if (frame.messageType == MessageType.RAW_CAN_FRAME && observations.isNotEmpty()) {
+                    // This is receipt freshness, independent of the gateway's cumulative boot counter.
+                    // Historical CAPTURE_LOG_CHUNK traffic must never make the live bus appear current.
+                    lastVehicleFrameAtEpochMs = System.currentTimeMillis()
                 }
             }
             MessageType.GATEWAY_HEALTH -> {
@@ -908,6 +924,10 @@ private class GatewayGattConnection(
                 busErrors = health.busErrorCount
                 busOffEvents = health.busOffCount
                 bitrateBps = health.canBitrateBps
+                vehicleMotion = health.vehicleMotion
+                vehicleMotionObservedAtEpochMs = System.currentTimeMillis()
+                vehicleMotionFrameSequence = frame.sequence
+                vehicleMotionGatewayMonotonicMicroseconds = frame.monotonicMicroseconds
             }
             MessageType.DIAGNOSTIC_RESPONSE -> {
                 val response = try {
@@ -929,7 +949,15 @@ private class GatewayGattConnection(
             }
             else -> Unit
         }
-        emit(ConnectionPhase.STREAMING, IndicatorLevel.PASS, "Validated evidence is streaming and persisted locally.")
+        emit(
+            ConnectionPhase.STREAMING,
+            if (evidenceScope == null) IndicatorLevel.CHECK else IndicatorLevel.PASS,
+            if (evidenceScope == null) {
+                "Validated evidence is streaming, but a vehicle profile is required before it can be attributed and persisted."
+            } else {
+                "Validated evidence is streaming and persisted in its vehicle/profile scope."
+            },
+        )
     }
 
     private fun fail(detail: String) {
@@ -985,10 +1013,15 @@ private class GatewayGattConnection(
                 protocolFailures = protocolFailures,
                 reconnects = reconnectCount,
                 vehicleFrames = vehicleFrames,
+                lastVehicleFrameAtEpochMs = lastVehicleFrameAtEpochMs,
                 busErrors = busErrors,
                 busOffEvents = busOffEvents,
                 listenOnly = source?.listenOnly,
                 bitrateBps = bitrateBps,
+                vehicleMotion = vehicleMotion,
+                vehicleMotionObservedAtEpochMs = vehicleMotionObservedAtEpochMs,
+                vehicleMotionFrameSequence = vehicleMotionFrameSequence,
+                vehicleMotionGatewayMonotonicMicroseconds = vehicleMotionGatewayMonotonicMicroseconds,
                 j1979EcuCount = availability.size,
                 j1979EnumerationComplete = availability.takeIf { it.isNotEmpty() }
                     ?.all { it.enumerationComplete },
