@@ -56,9 +56,11 @@ when the button was pressed.
 
 ## Persistence and restart behavior
 
-SQLCipher schema version 6 stores the full mutation authorization beside capture starts,
+SQLCipher schema version 9 stores the full mutation authorization beside capture starts,
 finalizations, and markers. The original health-frame lineage remains in first-class columns; the
-new evidence-only fields are stored in a versioned extension:
+v6 evidence-only fields remain stored in a versioned extension, v7 excludes imported/recovered
+rows, v8 requires durable RAW-CAN parent/origin lineage for live anchors, and v9 persists marker
+boot identity and strict chronology:
 
 - mutation authority and health motion value;
 - gateway capture session;
@@ -69,7 +71,9 @@ new evidence-only fields are stored in a versioned extension:
 
 Capture and marker rows are inserted, never updated into a different meaning. A marker cannot cross
 gateway capture sessions. A successful evidence-only completion must still have fresh matching
-UNKNOWN/passive authority and a retained final raw-CAN anchor. If the link, authority, session, or
+UNKNOWN/passive authority and a retained final raw-CAN anchor that strictly follows the last
+installed marker's raw-CAN anchor. A marker and finalization can never reuse one bus observation.
+If the link, authority, session, or
 vehicle profile changes, only a safety abort is available. A reboot also closes an unfinished draft
 as interrupted; it never upgrades it to a completed capture.
 
@@ -108,8 +112,15 @@ desktop tests do not prove a vendor BLE stack or vehicle signal meaning.
 ### Migration acceptance still required on Android
 
 The v5-to-v6 migration adds only nullable authorization-extension columns, so legacy PARKED rows
-retain their first-class health lineage and decode with PARKED defaults. The current Mac has no
-attached Android target, so an encrypted v5 fixture has not yet been executed through SQLCipher's
-device runtime. Before a release build is promoted, run a v5 fixture migration on the target head
-unit (or an API-26+ emulator), then prove that existing PARKED capture/marker rows survive unchanged
-and all three extension columns remain null. Destructive migration is forbidden.
+retain their first-class health lineage and decode with PARKED defaults. Schema 6 -> 7 adds import
+provenance and deliberately defaults all pre-v7 raw/CAN rows to non-authoritative because their
+origin cannot be reconstructed. It backfills only rows on a real validated source in a scope with
+no legacy import receipt and with no contradiction between the source registry and stored frame
+roles; imported, receipt-bearing, or role-conflicted scopes stay false. The current Mac has no
+attached Android target, so these encrypted
+migrations have not yet executed through SQLCipher's device runtime. Before release promotion, run
+v5, v6, v7, and v8 fixtures on the target head unit (or an API-26+ emulator), prove existing captures remain
+unchanged, prove definite local rows retain authority, and prove imported/ambiguous pre-v7 rows
+cannot satisfy live-anchor checks. Also prove that pre-v8 rows cannot invent RAW-CAN parent lineage
+and pre-v9 marker rows cannot authorize completion without a durable boot identity. Destructive
+migration is forbidden.

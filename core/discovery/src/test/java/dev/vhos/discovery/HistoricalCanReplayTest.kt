@@ -2,6 +2,7 @@ package dev.vhos.discovery
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,6 +23,30 @@ class HistoricalCanReplayTest {
         assertEquals(0L, report.decoderDiscardedBytes)
         assertTrue(report.exactRecordOrderAndPayloadMatch)
         assertTrue(report.passed)
+        assertEquals(256, report.provenance.localAuthorizedRecords)
+    }
+
+    @Test
+    fun replayPreservesImportedAndRecoveredAuthorityClasses() {
+        val source = RealCanFixture.load(javaClass).take(2)
+        val records = listOf(
+            source[0].copy(provenance = DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY),
+            source[1].copy(provenance = DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY),
+        )
+        val observed = mutableListOf<DiscoveryEvidenceProvenance>()
+
+        val report = HistoricalCanReplay.run(records, onRecord = { observed += it.provenance })
+
+        assertEquals(
+            listOf(
+                DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY,
+                DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY,
+            ),
+            observed,
+        )
+        assertEquals(1, report.provenance.importedV1Records)
+        assertEquals(1, report.provenance.recoveredV2Records)
+        assertEquals(0, report.provenance.localAuthorizedRecords)
     }
 
     @Test
@@ -63,6 +88,38 @@ class HistoricalCanReplayTest {
             assertTrue(report.expectedMissingRecords > 0)
             assertEquals(report.expectedRecordsAfterFaults, report.decodedRecords)
             assertTrue(report.decoderRecoveries > 0)
+        }
+    }
+
+    @Test
+    fun replayRejectsUnsignedClockWrapAndOffsetOverflow() {
+        val source = RealCanFixture.load(javaClass).first()
+        val sequenceWrap = listOf(
+            source.copy(observation = source.observation.copy(
+                sourceSequence = ULong.MAX_VALUE,
+                monotonicMicroseconds = 10UL,
+            )),
+            source.copy(observation = source.observation.copy(
+                sourceSequence = 0UL,
+                monotonicMicroseconds = 20UL,
+            )),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            HistoricalCanReplay.run(sequenceWrap)
+        }
+
+        val offsetOverflow = listOf(
+            source.copy(observation = source.observation.copy(
+                sourceSequence = 1UL,
+                monotonicMicroseconds = 0UL,
+            )),
+            source.copy(observation = source.observation.copy(
+                sourceSequence = 2UL,
+                monotonicMicroseconds = ULong.MAX_VALUE,
+            )),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            HistoricalCanReplay.run(offsetOverflow)
         }
     }
 }

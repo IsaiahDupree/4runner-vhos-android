@@ -3,6 +3,7 @@ package dev.vhos.discovery
 import dev.vhos.model.ConnectionPhase
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.VehicleMotion
+import java.time.Instant
 
 /**
  * Android-internal operational records for the Discovery laboratory. They are deliberately named
@@ -310,6 +311,16 @@ data class AndroidDiscoveryEvidenceAnchor(
     fun validate(): AndroidDiscoveryEvidenceAnchor = apply {
         require(sourceId.isNotBlank()) { "Discovery evidence anchor requires a source identity." }
     }
+
+    fun strictlyFollows(prior: AndroidDiscoveryEvidenceAnchor): Boolean =
+        sourceId == prior.sourceId && canSessionId == prior.canSessionId &&
+            sourceSequence > prior.sourceSequence &&
+            gatewayMonotonicMicroseconds > prior.gatewayMonotonicMicroseconds
+
+    fun isAtOrAfter(prior: AndroidDiscoveryEvidenceAnchor): Boolean =
+        sourceId == prior.sourceId && canSessionId == prior.canSessionId &&
+            sourceSequence >= prior.sourceSequence &&
+            gatewayMonotonicMicroseconds >= prior.gatewayMonotonicMicroseconds
 }
 
 enum class AndroidCaptureDraftState { ACTIVE, COMPLETED, ABORTED }
@@ -566,6 +577,9 @@ data class AndroidDiscoveryCaptureDraft(
         ) {
             "AndroidDiscoveryCaptureDraft start identity and clocks are required."
         }
+        val startedInstant = runCatching { Instant.parse(startedAt) }.getOrElse {
+            throw IllegalArgumentException("AndroidDiscoveryCaptureDraft start wall clock is invalid.", it)
+        }
         require(vehicleProfileRevisionId.isNotBlank())
         testTemplateSnapshot.validate()
         require(
@@ -606,6 +620,12 @@ data class AndroidDiscoveryCaptureDraft(
                 !endedBootId.isNullOrBlank() && endLogicalFrameCount != null &&
                 endCanObservationCount != null && finalizationAuthority != null
             ) { "A final AndroidDiscoveryCaptureDraft requires final clocks and evidence cursors." }
+            val endedInstant = runCatching { Instant.parse(requireNotNull(endedAt)) }.getOrElse {
+                throw IllegalArgumentException("AndroidDiscoveryCaptureDraft end wall clock is invalid.", it)
+            }
+            require(!endedInstant.isBefore(startedInstant)) {
+                "AndroidDiscoveryCaptureDraft wall clock moved backwards."
+            }
             if (endedBootId == startedBootId) {
                 require(endedElapsedRealtimeNanos >= startedElapsedRealtimeNanos) {
                     "AndroidDiscoveryCaptureDraft monotonic clocks moved backwards within one boot."
@@ -633,12 +653,24 @@ data class AndroidDiscoveryCaptureDraft(
                 require(final.sourceId == sourceId &&
                     final.mutationAuthority == safetyAuthorization.mutationAuthority
                 ) { "Capture finalization authority changed type or source." }
+                startAnchor?.let { start ->
+                    requireNotNull(endAnchor) {
+                        "A completed anchored capture requires a final RAW_CAN anchor."
+                    }.also { end ->
+                        require(end.isAtOrAfter(start)) {
+                            "Capture final RAW_CAN anchor precedes or changes the start timeline."
+                        }
+                    }
+                }
                 if (expectedFinalAuthority == AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION) {
                     require(final.captureSessionId == safetyAuthorization.captureSessionId) {
                         "Selector bootstrap cannot cross gateway capture sessions."
                     }
                     require(endAnchor == final.rawCanAnchor) {
                         "Selector bootstrap end must bind to its exact live RAW_CAN lineage."
+                    }
+                    require(requireNotNull(endAnchor).strictlyFollows(requireNotNull(startAnchor))) {
+                        "Selector bootstrap final RAW_CAN anchor must strictly advance beyond its start."
                     }
                 }
             } else {
@@ -660,6 +692,8 @@ data class AndroidDiscoveryMarkerRecord(
     val unit: String?,
     val observedAt: String,
     val elapsedRealtimeNanos: Long,
+    /** Null is reserved for quarantined pre-v9 history and is rejected for every new append. */
+    val observedBootId: String?,
     val evidenceAnchor: AndroidDiscoveryEvidenceAnchor?,
     val observer: String,
     val note: String?,
@@ -672,6 +706,12 @@ data class AndroidDiscoveryMarkerRecord(
         AndroidDiscoveryMarkerDefinition(eventType, label, kind, unit).validate()
         require(observedAt.isNotBlank() && elapsedRealtimeNanos >= 0 && observer.isNotBlank()) {
             "AndroidDiscoveryMarkerRecord clocks and observer are required."
+        }
+        require(runCatching { Instant.parse(observedAt) }.isSuccess) {
+            "AndroidDiscoveryMarkerRecord wall clock must be an ISO-8601 instant."
+        }
+        require(observedBootId == null || observedBootId.isNotBlank()) {
+            "AndroidDiscoveryMarkerRecord boot identity cannot be blank."
         }
         require(kind != AndroidDiscoveryMarkerKind.MANUAL_MEASUREMENT || !value.isNullOrBlank()) {
             "A manual measurement AndroidDiscoveryMarkerRecord requires a value."
@@ -763,6 +803,7 @@ data class AndroidCandidateResearchItem(
     val captureSessions: Int,
     val researchPriority: Int,
     val confidence: Double?,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
     val authority: String,
     val nextValidation: String,
     val promotionChecklist: AndroidSignalPromotionGate,
@@ -771,6 +812,12 @@ data class AndroidCandidateResearchItem(
         require(candidateId.isNotBlank() && sourceDescription.isNotBlank() && evidenceStatus.isNotBlank())
         require(retainedRecords >= 0 && captureSessions >= 0 && researchPriority in 0..100)
         require(confidence == null || confidence in 0.0..1.0)
+        require(provenance.totalRecords == retainedRecords) {
+            "Candidate provenance does not account for every retained record."
+        }
+        require(provenance.representedClassifications <= 1) {
+            "Candidate planning refuses to mix local, imported, recovered, or ambiguous authority."
+        }
         require(authority == AUTHORITY && nextValidation.isNotBlank())
         require(!promotionChecklist.ready) {
             "Discovery-only AndroidCandidateResearchItem cannot become promotion-ready without a validated registry contract."
@@ -797,6 +844,9 @@ object AndroidCandidateResearchAdapter {
             val candidate = requireNotNull(evaluationById[mission.hypothesisId]) {
                 "Candidate research mission has no evaluation."
             }
+            require(candidate.provenance.representedClassifications <= 1) {
+                "Candidate planning refuses a hypothesis evaluation with mixed evidence authority."
+            }
             AndroidCandidateResearchItem(
                 candidateId = candidate.hypothesisId,
                 sourceDescription = "${candidate.identifierHex} • ${candidate.targetEvidenceStatus}",
@@ -806,6 +856,7 @@ object AndroidCandidateResearchAdapter {
                 captureSessions = candidate.sessions,
                 researchPriority = mission.researchPriority,
                 confidence = null,
+                provenance = candidate.provenance,
                 authority = AndroidCandidateResearchItem.AUTHORITY,
                 nextValidation = mission.nextValidation,
                 promotionChecklist = AndroidSignalPromotionGate(

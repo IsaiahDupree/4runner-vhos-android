@@ -152,7 +152,7 @@ assert that a proposed signal or decoder is correct.
 
 ## Android operational persistence
 
-SQLCipher schema version 6 retains immutable vehicle lineage and extends the Discovery lifecycle
+SQLCipher schema version 9 retains immutable vehicle lineage and extends the Discovery lifecycle
 with versioned mutation-authorization data:
 
 ### `logical_frames` and `can_observations`
@@ -182,7 +182,7 @@ Append-only operator observations and independent measurements. A marker contain
 - versioned template event type and human label;
 - state, observation, or manual-measurement kind;
 - original value text and unit when measured;
-- wall-clock and Android elapsed-realtime clocks;
+- wall-clock, Android elapsed-realtime, and durable Android boot-identity clocks;
 - observer and optional note; and
 - the nearest retained gateway capture/session/sequence/monotonic anchor when available; and
 - the exact fresh mutation authority that authorized the append; selector-bootstrap markers also
@@ -191,7 +191,10 @@ Append-only operator observations and independent measurements. A marker contain
 Markers can only be appended to an active capture whose vehicle/profile/source identity still equals
 the current vehicle binding. Measurements require a finite number in the UI
 and retain the originally entered text and unit; the app does not silently convert or reinterpret
-them.
+them. Within one capture, boot identity is fixed, monotonic and wall clocks cannot regress, and any
+RAW-CAN anchor must strictly advance from the start or previous marker. Completion must finish at or
+after the last marker and its last anchor; pre-v9 markers with unknown boot identity can be preserved
+or safety-aborted but cannot authorize a completed run.
 
 ### `android_capability_observations`
 
@@ -211,8 +214,21 @@ Schema 5 -> 6 adds nullable, versioned authorization-extension JSON to capture s
 finalizations, and markers. Existing PARKED rows keep their first-class health lineage and decode
 with strict PARKED/listen-only defaults; the release gate still requires running an encrypted v5
 fixture through SQLCipher on Android before promotion.
-Schema 5 -> 6 only adds nullable, versioned authorization-extension columns. Existing PARKED records
-retain their original meaning; no prior row is upgraded to selector-bootstrap authority.
+Schema 6 -> 7 adds import provenance to receipts and raw/CAN rows. Existing rows default to
+`vehicle_claims_authorized=false`, then the transactional migration backfills true only for a real
+validated source in a vehicle/profile with no legacy import receipt. Imported sources and every
+receipt-bearing mixed scope stay false because individual legacy-row provenance cannot be recovered.
+Any legacy source-role collision also leaves both logical and CAN rows non-authoritative rather than
+guessing which stored role represents the physical device.
+Schema 7 -> 8 adds CAN origin/parent lineage without guessing it for legacy rows; NULL legacy origin
+cannot authorize a current anchor. Schema 8 -> 9 adds nullable marker boot identity; new appends
+require it and legacy NULL markers remain historical only.
+Every returned observation is classified as local-authorized, imported-v1, recovered-v2, or
+ambiguous legacy evidence. Analysis reports, replay progress/results, offline link-reliability
+results, summaries, and the engineering UI preserve those counts. Vehicle capability snapshots use
+only locally authorized rows and locally
+authorized identifiers. Exact duplicate identities remain idempotent; contradictory logical-frame
+or CAN identities roll back the whole import without a receipt, and source IDs cannot change roles.
 
 ## Clock and evidence lineage
 

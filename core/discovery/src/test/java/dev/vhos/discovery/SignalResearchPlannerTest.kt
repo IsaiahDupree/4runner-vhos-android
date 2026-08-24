@@ -17,7 +17,7 @@ class SignalResearchPlannerTest {
         val brief = SignalResearchPlanner.plan(discovery, evaluation, pack)
 
         assertEquals("ENGINEERING_RESEARCH_PLAN", brief.status)
-        assertEquals("0.4.0", brief.packVersion)
+        assertEquals("0.4.1", brief.packVersion)
         assertEquals(11, brief.candidateCount)
         assertEquals(11, brief.presentCount)
         assertTrue(brief.dynamicFieldCount >= 1)
@@ -71,5 +71,28 @@ class SignalResearchPlannerTest {
         }
 
         assertTrue(error.message.orEmpty().contains("lineage"))
+    }
+
+    @Test
+    fun plannerRefusesToMixLiveImportedAndRecoveredAuthority() {
+        val fixture = RealCanFixture.load(javaClass)
+        val identifier = 708u // 0x2C4 is represented by the bundled research pack.
+        val base = fixture.filter { it.observation.identifier == identifier }.take(3)
+        assertEquals(3, base.size)
+        val records = listOf(
+            base[0],
+            base[1].copy(provenance = DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY),
+            base[2].copy(provenance = DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY),
+        )
+        val pack = SignalHypothesisCatalog.loadBundled()
+        val discovery = CanDiscoveryAnalyzer.analyze(records)
+        val evaluation = SignalHypothesisEvaluator.evaluate(records, pack)
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            SignalResearchPlanner.plan(discovery, evaluation, pack)
+        }
+
+        assertTrue(error.message.orEmpty().contains("mix"))
+        assertTrue(evaluation.evaluations.any { it.provenance.representedClassifications > 1 })
     }
 }

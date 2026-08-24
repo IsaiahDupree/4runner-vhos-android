@@ -82,6 +82,7 @@ data class LinkReliabilityMatrixReport(
     val sourceClassification: String,
     val soakCycles: Int,
     val scenarios: List<LinkReliabilityScenarioReport>,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
     val authority: String,
 ) {
     val passed: Boolean get() = scenarios.all { it.passed }
@@ -116,8 +117,8 @@ object LinkReliabilityLab {
                 Triple(it.sourceId, it.observation.sessionId, it.observation.sourceSequence)
             }.size == ordered.size
         ) { "The link lab refuses duplicate source evidence identities." }
-        val sourceByWireIdentity = ordered.associate { item ->
-            (item.observation.sessionId to item.observation.sourceSequence) to item.sourceId
+        val sourceByWireIdentity = ordered.associateBy {
+            it.observation.sessionId to it.observation.sourceSequence
         }
         require(sourceByWireIdentity.size == ordered.size) {
             "A wire identity resolves to more than one immutable source."
@@ -133,13 +134,14 @@ object LinkReliabilityLab {
             sourceClassification = HISTORICAL_REPLAY_SOURCE,
             soakCycles = soakCycles,
             scenarios = reports,
+            provenance = DiscoveryEvidenceProvenanceBreakdown.from(ordered),
             authority = "Offline transport recovery only; no live link, RF immunity, CAN meaning, or vehicle health is proven.",
         )
     }
 
     private fun runScenario(
         records: List<DiscoveryObservation>,
-        sourceByWireIdentity: Map<Pair<UInt, ULong>, String>,
+        sourceByWireIdentity: Map<Pair<UInt, ULong>, DiscoveryObservation>,
         scenario: LinkReliabilityScenario,
         soakCycles: Int,
         shouldContinue: () -> Boolean,
@@ -381,7 +383,7 @@ object LinkReliabilityLab {
     }
 
     private class ReliabilityReceiver(
-        private val sourceByWireIdentity: Map<Pair<UInt, ULong>, String>,
+        private val sourceByWireIdentity: Map<Pair<UInt, ULong>, DiscoveryObservation>,
     ) {
         val decoder = FrameStreamDecoder()
         val accepted = mutableListOf<DiscoveryObservation>()
@@ -410,10 +412,14 @@ object LinkReliabilityLab {
             }
             decoder.append(chunk).forEach { frame ->
                 frame.decodeCanObservations().forEach { observation ->
-                    val sourceId = checkNotNull(
+                    val source = checkNotNull(
                         sourceByWireIdentity[observation.sessionId to observation.sourceSequence]
                     ) { "Decoded link-lab record has no immutable source identity." }
-                    val identity = Triple(sourceId, observation.sessionId, observation.sourceSequence)
+                    val identity = Triple(
+                        source.sourceId,
+                        observation.sessionId,
+                        observation.sourceSequence,
+                    )
                     if (!identities.add(identity)) {
                         duplicateRejections++
                         return@forEach
@@ -429,7 +435,7 @@ object LinkReliabilityLab {
                         if (delta > 1UL) outerSequenceGaps += delta - 1UL
                     }
                     lastOuterSequence = frame.sequence
-                    accepted += DiscoveryObservation(sourceId, observation)
+                    accepted += source.copy(observation = observation)
                 }
             }
         }

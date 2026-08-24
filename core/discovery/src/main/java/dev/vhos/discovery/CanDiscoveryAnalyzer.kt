@@ -8,7 +8,54 @@ import kotlin.math.sqrt
 data class DiscoveryObservation(
     val sourceId: String,
     val observation: CanObservation,
+    val provenance: DiscoveryEvidenceProvenance,
 )
+
+/**
+ * Authority is attached to every observation before it enters analysis or replay. Historical
+ * evidence remains useful, but callers can never mistake an imported row for a live acquisition.
+ */
+enum class DiscoveryEvidenceProvenance {
+    LOCAL_AUTHORIZED,
+    IMPORTED_V1_HISTORY,
+    RECOVERED_V2_HISTORY,
+    AMBIGUOUS_LEGACY_HISTORY,
+}
+
+data class DiscoveryEvidenceProvenanceBreakdown(
+    val localAuthorizedRecords: Int,
+    val importedV1Records: Int,
+    val recoveredV2Records: Int,
+    val ambiguousLegacyRecords: Int,
+) {
+    val totalRecords: Int
+        get() = localAuthorizedRecords + importedV1Records + recoveredV2Records + ambiguousLegacyRecords
+
+    val representedClassifications: Int
+        get() = listOf(
+            localAuthorizedRecords,
+            importedV1Records,
+            recoveredV2Records,
+            ambiguousLegacyRecords,
+        ).count { it > 0 }
+
+    companion object {
+        fun from(input: List<DiscoveryObservation>) = DiscoveryEvidenceProvenanceBreakdown(
+            localAuthorizedRecords = input.count {
+                it.provenance == DiscoveryEvidenceProvenance.LOCAL_AUTHORIZED
+            },
+            importedV1Records = input.count {
+                it.provenance == DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY
+            },
+            recoveredV2Records = input.count {
+                it.provenance == DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY
+            },
+            ambiguousLegacyRecords = input.count {
+                it.provenance == DiscoveryEvidenceProvenance.AMBIGUOUS_LEGACY_HISTORY
+            },
+        )
+    }
+}
 
 data class CanAcquisitionSummary(
     val records: Int,
@@ -25,6 +72,7 @@ data class CanAcquisitionSummary(
     val estimatedObservedRateFps: Double,
     val retainedRecordRateFps: Double,
     val sequenceCoverage: Double,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 )
 
 data class CanSessionSummary(
@@ -39,6 +87,7 @@ data class CanSessionSummary(
     val retainedRecordRateFps: Double,
     val sequenceCoverage: Double,
     val uniqueIdentifiers: Int,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 )
 
 data class RawWordSummary(
@@ -66,6 +115,7 @@ data class IdentifierActivity(
     val dynamicBytePositions: List<Int>,
     val firstBigEndianWord: RawWordSummary?,
     val checksum: ChecksumCandidate,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 ) {
     val identifierHex: String
         get() = if (extended) {
@@ -81,6 +131,7 @@ data class RawWordRelationshipCandidate(
     val pairedSamples: Int,
     val pearsonCorrelation: Double,
     val medianRightToLeftRatio: Double?,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 )
 
 data class RepeatedChannelCandidate(
@@ -90,7 +141,24 @@ data class RepeatedChannelCandidate(
     val minimum: Int,
     val maximum: Int,
     val maximumDisagreement: Int = 0,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 )
+
+data class DiscoveryAnalysisLimits(
+    val maximumObservations: Int = 100_000,
+    val maximumEligibleIdentifiers: Int = 128,
+    val maximumCorrelationPairs: Int = 4_096,
+    val maximumPairedSamplesPerCorrelation: Int = 25_000,
+) {
+    fun validate(): DiscoveryAnalysisLimits = apply {
+        require(maximumObservations in 1..100_000)
+        require(maximumEligibleIdentifiers in 2..512)
+        require(maximumCorrelationPairs in 1..130_816)
+        require(maximumPairedSamplesPerCorrelation in 10..100_000)
+    }
+}
+
+class DiscoveryAnalysisCancelledException : IllegalStateException("CAN discovery analysis was cancelled.")
 
 data class CanDiscoveryReport(
     val contractVersion: String,
@@ -110,8 +178,17 @@ object CanDiscoveryAnalyzer {
     const val AUTHORITY =
         "Raw acquisition statistics only; no identifier, field, unit, scale, subsystem, or health meaning is accepted."
 
-    fun analyze(input: List<DiscoveryObservation>): CanDiscoveryReport {
+    fun analyze(
+        input: List<DiscoveryObservation>,
+        limits: DiscoveryAnalysisLimits = DiscoveryAnalysisLimits(),
+        shouldContinue: () -> Boolean = { true },
+    ): CanDiscoveryReport {
+        limits.validate()
         require(input.isNotEmpty()) { "No persisted CAN observations are available." }
+        require(input.size <= limits.maximumObservations) {
+            "CAN discovery observation count exceeds the deterministic analysis bound."
+        }
+        ensureAnalysisContinues(shouldContinue)
         require(input.all { it.sourceId.isNotBlank() }) { "CAN source identity is required." }
         require(input.all { it.observation.listenOnly }) {
             "Every analyzed CAN observation must retain listen-only proof."
@@ -120,6 +197,7 @@ object CanDiscoveryAnalyzer {
             Triple(it.sourceId, it.observation.sessionId, it.observation.sourceSequence)
         }.eachCount().entries.firstOrNull { it.value > 1 }
         require(duplicateIdentity == null) { "Duplicate CAN observation identity is not analyzable." }
+        validateSessionClockOrder(input)
 
         val sessions = input.groupBy { it.sourceId to it.observation.sessionId }
             .map { (key, records) -> sessionSummary(key, records) }
@@ -133,9 +211,15 @@ object CanDiscoveryAnalyzer {
                     .thenBy { it.identifier }
             )
         val duration = sessions.sumOf { it.durationSeconds }
-        val sequenceSpan = sessions.fold(0UL) { total, session -> total + session.sequenceSpan }
+        val sequenceSpan = sessions.fold(0UL) { total, session ->
+            checkedAdd(total, session.sequenceSpan, "Aggregate CAN sequence span overflowed.")
+        }
         val observedIntervals = sessions.fold(0UL) { total, session ->
-            total + if (session.sequenceSpan > 0UL) session.sequenceSpan - 1UL else 0UL
+            checkedAdd(
+                total,
+                if (session.sequenceSpan > 0UL) session.sequenceSpan - 1UL else 0UL,
+                "Aggregate CAN sequence interval count overflowed.",
+            )
         }
         val acquisition = CanAcquisitionSummary(
             records = input.size,
@@ -152,6 +236,7 @@ object CanDiscoveryAnalyzer {
             estimatedObservedRateFps = if (duration > 0.0) observedIntervals.toDouble() / duration else 0.0,
             retainedRecordRateFps = if (duration > 0.0) input.size / duration else 0.0,
             sequenceCoverage = if (sequenceSpan > 0UL) input.size / sequenceSpan.toDouble() else 0.0,
+            provenance = DiscoveryEvidenceProvenanceBreakdown.from(input),
         )
         return CanDiscoveryReport(
             contractVersion = CONTRACT_VERSION,
@@ -160,8 +245,14 @@ object CanDiscoveryAnalyzer {
             acquisition = acquisition,
             sessions = sessions,
             identifierActivity = activity,
-            rawWordRelationships = correlationCandidates(identifiers, sessions, input),
-            repeatedChannels = repeatedChannelCandidates(identifiers),
+            rawWordRelationships = correlationCandidates(
+                identifiers,
+                sessions,
+                input,
+                limits,
+                shouldContinue,
+            ),
+            repeatedChannels = repeatedChannelCandidates(identifiers, shouldContinue),
         )
     }
 
@@ -173,8 +264,16 @@ object CanDiscoveryAnalyzer {
         val times = records.map { it.observation.monotonicMicroseconds }
         val firstSequence = sequences.min()
         val lastSequence = sequences.max()
-        val span = lastSequence - firstSequence + 1UL
-        val duration = (times.max() - times.min()).toDouble() / 1_000_000.0
+        val span = checkedAdd(
+            checkedSubtract(lastSequence, firstSequence, "CAN source sequence regressed."),
+            1UL,
+            "CAN source sequence span overflowed.",
+        )
+        val duration = checkedSubtract(
+            times.max(),
+            times.min(),
+            "CAN monotonic clock regressed.",
+        ).toDouble() / 1_000_000.0
         return CanSessionSummary(
             sourceId = key.first,
             sessionId = key.second,
@@ -189,6 +288,7 @@ object CanDiscoveryAnalyzer {
             uniqueIdentifiers = records.map {
                 it.observation.identifier to it.observation.extended
             }.toSet().size,
+            provenance = DiscoveryEvidenceProvenanceBreakdown.from(records),
         )
     }
 
@@ -242,6 +342,7 @@ object CanDiscoveryAnalyzer {
                 matchRate = matchRate,
                 candidate = checksumRecords.size >= 5 && matchRate >= 0.95,
             ),
+            provenance = DiscoveryEvidenceProvenanceBreakdown.from(records),
         )
     }
 
@@ -264,25 +365,45 @@ object CanDiscoveryAnalyzer {
         identifiers: Map<Pair<UInt, Boolean>, List<DiscoveryObservation>>,
         sessions: List<CanSessionSummary>,
         input: List<DiscoveryObservation>,
+        limits: DiscoveryAnalysisLimits,
+        shouldContinue: () -> Boolean,
     ): List<RawWordRelationshipCandidate> {
         val eligible = identifiers.entries.filter { (key, values) ->
             !key.second && values.count { it.observation.dataLength >= 2 } >= 10 &&
                 values.mapNotNull { firstWord(it.observation) }.distinct().size > 1
         }.map { it.key }.sortedBy { it.first }
+        require(eligible.size <= limits.maximumEligibleIdentifiers) {
+            "Eligible CAN identifier count exceeds the deterministic correlation bound."
+        }
+        val correlationPairCount = eligible.size.toLong() * (eligible.size.toLong() - 1L) / 2L
+        require(correlationPairCount <= limits.maximumCorrelationPairs.toLong()) {
+            "CAN correlation pair count exceeds the deterministic analysis bound."
+        }
         val bySession = input.groupBy { it.sourceId to it.observation.sessionId }
+        val sessionKeys = sessions.map { it.sourceId to it.sessionId }.distinct()
+        // Build each identifier/session timeline once. Pair evaluation must never rescan the full
+        // evidence list for every O(n^2) identifier combination.
+        val timelines = eligible.associateWith { key ->
+            sessionKeys.associateWith { sessionKey ->
+                ensureAnalysisContinues(shouldContinue)
+                wordTimeline(bySession[sessionKey].orEmpty(), key)
+            }
+        }
         val results = mutableListOf<RawWordRelationshipCandidate>()
         eligible.forEachIndexed { leftIndex, leftKey ->
             eligible.drop(leftIndex + 1).forEach { rightKey ->
+                ensureAnalysisContinues(shouldContinue)
                 val leftValues = mutableListOf<Double>()
                 val rightValues = mutableListOf<Double>()
-                sessions.forEach { session ->
-                    val sessionRecords = bySession[session.sourceId to session.sessionId].orEmpty()
-                    val left = wordTimeline(sessionRecords, leftKey)
-                    val right = wordTimeline(sessionRecords, rightKey)
-                    nearestPairs(left, right).forEach { pair ->
-                        leftValues += pair.first
-                        rightValues += pair.second
-                    }
+                sessionKeys.forEach { sessionKey ->
+                    appendNearestPairs(
+                        left = timelines.getValue(leftKey).getValue(sessionKey),
+                        right = timelines.getValue(rightKey).getValue(sessionKey),
+                        leftValues = leftValues,
+                        rightValues = rightValues,
+                        maximumSamples = limits.maximumPairedSamplesPerCorrelation,
+                        shouldContinue = shouldContinue,
+                    )
                 }
                 if (leftValues.size < 10) return@forEach
                 val correlation = pearson(leftValues, rightValues) ?: return@forEach
@@ -296,6 +417,9 @@ object CanDiscoveryAnalyzer {
                     pairedSamples = leftValues.size,
                     pearsonCorrelation = correlation,
                     medianRightToLeftRatio = median(ratios),
+                    provenance = DiscoveryEvidenceProvenanceBreakdown.from(
+                        identifiers.getValue(leftKey) + identifiers.getValue(rightKey)
+                    ),
                 )
             }
         }
@@ -308,9 +432,11 @@ object CanDiscoveryAnalyzer {
 
     private fun repeatedChannelCandidates(
         identifiers: Map<Pair<UInt, Boolean>, List<DiscoveryObservation>>,
+        shouldContinue: () -> Boolean,
     ): List<RepeatedChannelCandidate> {
         val results = mutableListOf<RepeatedChannelCandidate>()
         identifiers.entries.sortedBy { it.key.first }.forEach { (key, records) ->
+            ensureAnalysisContinues(shouldContinue)
             if (key.second || records.size < 5) return@forEach
             val length = records.minOf { it.observation.dataLength }
             val columns = mutableMapOf<List<Int>, MutableList<Int>>()
@@ -326,6 +452,7 @@ object CanDiscoveryAnalyzer {
                         recordsCompared = records.size,
                         minimum = values.min(),
                         maximum = values.max(),
+                        provenance = DiscoveryEvidenceProvenanceBreakdown.from(records),
                     )
                 }
             }
@@ -346,20 +473,27 @@ object CanDiscoveryAnalyzer {
         }
     }.sortedBy { it.first }
 
-    private fun nearestPairs(
+    private fun appendNearestPairs(
         left: List<Pair<ULong, Double>>,
         right: List<Pair<ULong, Double>>,
-    ): List<Pair<Double, Double>> {
-        if (left.isEmpty() || right.isEmpty()) return emptyList()
+        leftValues: MutableList<Double>,
+        rightValues: MutableList<Double>,
+        maximumSamples: Int,
+        shouldContinue: () -> Boolean,
+    ) {
+        if (left.isEmpty() || right.isEmpty()) return
         var rightIndex = 0
-        return buildList {
-            left.forEach { (timestamp, value) ->
-                while (rightIndex + 1 < right.size &&
-                    distance(right[rightIndex + 1].first, timestamp) <= distance(right[rightIndex].first, timestamp)
-                ) rightIndex++
-                if (distance(right[rightIndex].first, timestamp) <= PAIRING_WINDOW_MICROSECONDS) {
-                    add(value to right[rightIndex].second)
+        left.forEach { (timestamp, value) ->
+            ensureAnalysisContinues(shouldContinue)
+            while (rightIndex + 1 < right.size &&
+                distance(right[rightIndex + 1].first, timestamp) <= distance(right[rightIndex].first, timestamp)
+            ) rightIndex++
+            if (distance(right[rightIndex].first, timestamp) <= PAIRING_WINDOW_MICROSECONDS) {
+                require(leftValues.size < maximumSamples) {
+                    "CAN correlation sample count exceeds the deterministic per-pair bound."
                 }
+                leftValues += value
+                rightValues += right[rightIndex].second
             }
         }
     }
@@ -409,4 +543,42 @@ object CanDiscoveryAnalyzer {
 
     private fun distance(left: ULong, right: ULong): ULong =
         if (left >= right) left - right else right - left
+
+    private fun validateSessionClockOrder(input: List<DiscoveryObservation>) {
+        input.groupBy { it.sourceId to it.observation.sessionId }.values.forEach { records ->
+            val orderedByTime = records.sortedWith(
+                compareBy<DiscoveryObservation> { it.observation.monotonicMicroseconds }
+                    .thenBy { it.observation.sourceSequence }
+            )
+            orderedByTime.zipWithNext().forEach { (prior, current) ->
+                require(current.observation.sourceSequence > prior.observation.sourceSequence) {
+                    "CAN source sequence regressed or wrapped within a capture session."
+                }
+            }
+            val orderedBySequence = records.sortedWith(
+                compareBy<DiscoveryObservation> { it.observation.sourceSequence }
+                    .thenBy { it.observation.monotonicMicroseconds }
+            )
+            orderedBySequence.zipWithNext().forEach { (prior, current) ->
+                require(
+                    current.observation.monotonicMicroseconds >=
+                        prior.observation.monotonicMicroseconds
+                ) { "CAN monotonic clock regressed or wrapped within a capture session." }
+            }
+        }
+    }
+
+    private fun checkedAdd(left: ULong, right: ULong, message: String): ULong {
+        require(right <= ULong.MAX_VALUE - left) { message }
+        return left + right
+    }
+
+    private fun checkedSubtract(left: ULong, right: ULong, message: String): ULong {
+        require(left >= right) { message }
+        return left - right
+    }
+
+    private fun ensureAnalysisContinues(shouldContinue: () -> Boolean) {
+        if (!shouldContinue()) throw DiscoveryAnalysisCancelledException()
+    }
 }

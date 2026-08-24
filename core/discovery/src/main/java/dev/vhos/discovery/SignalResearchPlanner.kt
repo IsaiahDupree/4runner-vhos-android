@@ -47,6 +47,15 @@ object SignalResearchPlanner {
         require(evaluation.evaluations.all { !it.productionValueDisplayAllowed }) {
             "A research plan cannot consume owner-display-authorized values."
         }
+        require(discovery.acquisition.provenance.representedClassifications <= 1 &&
+            evaluation.evaluations.all { it.provenance.representedClassifications <= 1 }
+        ) {
+            "A research plan cannot mix local, imported, recovered, or ambiguous evidence authority."
+        }
+        val discoveryAuthority = discovery.acquisition.provenance.representedAuthority()
+        require(evaluation.evaluations.all { candidate ->
+            candidate.provenance.representedAuthority()?.let { it == discoveryAuthority } ?: true
+        }) { "Signal evaluation and discovery results use different evidence authority classes." }
         require(
             evaluation.packId == pack.packId &&
                 evaluation.packVersion == pack.packVersion &&
@@ -161,6 +170,15 @@ object SignalResearchPlanner {
             missions = ranked,
         )
     }
+
+    private fun DiscoveryEvidenceProvenanceBreakdown.representedAuthority(): DiscoveryEvidenceProvenance? =
+        when {
+            localAuthorizedRecords > 0 -> DiscoveryEvidenceProvenance.LOCAL_AUTHORIZED
+            importedV1Records > 0 -> DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY
+            recoveredV2Records > 0 -> DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY
+            ambiguousLegacyRecords > 0 -> DiscoveryEvidenceProvenance.AMBIGUOUS_LEGACY_HISTORY
+            else -> null
+        }
 
     private fun stage(candidate: SignalHypothesisEvaluation, transformConflict: Boolean): String = when {
         candidate.targetEvidenceStatus == "ABSENT" -> "CAPTURE_REQUIRED"

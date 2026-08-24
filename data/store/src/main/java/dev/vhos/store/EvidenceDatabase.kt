@@ -22,6 +22,7 @@ import dev.vhos.discovery.AndroidDiscoverySafetyAuthorization
 import dev.vhos.discovery.AndroidDiscoveryTestTemplate
 import dev.vhos.model.VehicleMotion
 import dev.vhos.discovery.AndroidVehicleCapabilityObservation
+import dev.vhos.discovery.DiscoveryEvidenceProvenance
 import dev.vhos.digitaltwin.DigitalTwinSnapshot
 import dev.vhos.digitaltwin.HeadUnitInventory
 import dev.vhos.digitaltwin.HealthAssessment
@@ -30,10 +31,13 @@ import dev.vhos.digitaltwin.VehicleSystem
 import dev.vhos.model.DeviceRole
 import dev.vhos.protocol.CanObservation
 import dev.vhos.protocol.GatewayFrame
+import dev.vhos.protocol.MessageType
 import dev.vhos.protocol.decodeCanObservations
 import dev.vhos.sync.EvidenceBundles
+import dev.vhos.sync.EvidenceBundleManifest
 import dev.vhos.sync.ImportedEvidenceBundle
 import dev.vhos.sync.PortableEvidenceRecord
+import dev.vhos.sync.RecoveryEvidenceMetadata
 import net.zetetic.database.sqlcipher.SQLiteDatabase
 import net.zetetic.database.sqlcipher.SQLiteOpenHelper
 import java.time.Instant
@@ -58,7 +62,58 @@ data class PersistedCanObservation(
     val vehicleProfileRevisionId: String,
     val sourceId: String,
     val observation: CanObservation,
+    val provenance: PersistedEvidenceProvenance,
+    val originMessageType: MessageType?,
+    val parentLogicalFrameId: Long?,
 )
+
+private data class LogicalFrameInsertResult(
+    val rowId: Long,
+    val inserted: Boolean,
+)
+
+private data class PersistedMarkerChronology(
+    val observedAt: Instant,
+    val elapsedRealtimeNanos: Long,
+    val observedBootId: String?,
+    val evidenceAnchor: AndroidDiscoveryEvidenceAnchor?,
+)
+
+data class PersistedEvidenceProvenance(
+    val classification: DiscoveryEvidenceProvenance,
+    val importBundleId: String?,
+    val importManifestSha256: String?,
+    val importContractVersion: String?,
+    val recoveryClassification: String?,
+    val sourceLedgerSha256: String?,
+    val vehicleClaimsAuthorized: Boolean,
+) {
+    fun validate(): PersistedEvidenceProvenance = apply {
+        when (classification) {
+            DiscoveryEvidenceProvenance.LOCAL_AUTHORIZED -> require(
+                vehicleClaimsAuthorized && importBundleId == null && importManifestSha256 == null &&
+                    importContractVersion == null && recoveryClassification == null && sourceLedgerSha256 == null
+            ) { "Local CAN provenance contains import lineage or lacks authority." }
+
+            DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY -> require(
+                !vehicleClaimsAuthorized && importBundleId != null && importManifestSha256 != null &&
+                    importContractVersion == EvidenceBundleManifest.CONTRACT_VERSION_V1 &&
+                    recoveryClassification == null && sourceLedgerSha256 == null
+            ) { "Imported-v1 CAN provenance is incomplete or authoritative." }
+
+            DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY -> require(
+                !vehicleClaimsAuthorized && importBundleId != null && importManifestSha256 != null &&
+                    importContractVersion == EvidenceBundleManifest.CONTRACT_VERSION_V2 &&
+                    recoveryClassification == RecoveryEvidenceMetadata.CLASSIFICATION &&
+                    sourceLedgerSha256?.matches(Regex("^[0-9a-f]{64}$")) == true
+            ) { "Recovered-v2 CAN provenance is incomplete or authoritative." }
+
+            DiscoveryEvidenceProvenance.AMBIGUOUS_LEGACY_HISTORY -> require(!vehicleClaimsAuthorized) {
+                "Ambiguous legacy CAN provenance cannot authorize vehicle claims."
+            }
+        }
+    }
+}
 
 data class DiscoveryEvidenceSummary(
     val canObservations: Long,
@@ -66,6 +121,11 @@ data class DiscoveryEvidenceSummary(
     val uniqueCanIdentifiers: Int,
     val firstIngestedAt: String?,
     val lastIngestedAt: String?,
+    val localAuthorizedCanObservations: Long,
+    val localAuthorizedUniqueCanIdentifiers: Int,
+    val importedV1CanObservations: Long,
+    val recoveredV2CanObservations: Long,
+    val ambiguousLegacyCanObservations: Long,
 )
 
 data class DiscoveryEvidenceScope(
@@ -87,6 +147,30 @@ data class PersistedAndroidDiscoveryCapture(
     val session: AndroidDiscoveryCaptureDraft,
     val eventMarkerCount: Int,
 )
+
+private data class ImportedEvidenceProvenance(
+    val bundleId: String,
+    val manifestSha256: String,
+    val contractVersion: String,
+    val recoveryClassification: String?,
+    val sourceLedgerSha256: String?,
+) {
+    val vehicleClaimsAuthorized: Boolean = false
+}
+
+private const val LOCAL_AUTHORITY_SQL =
+    "vehicle_claims_authorized = 1 AND import_bundle_id IS NULL " +
+        "AND import_manifest_sha256 IS NULL AND import_contract_version IS NULL " +
+        "AND recovery_classification IS NULL AND source_ledger_sha256 IS NULL"
+private const val IMPORTED_V1_HISTORY_SQL =
+    "vehicle_claims_authorized = 0 AND import_bundle_id IS NOT NULL " +
+        "AND import_manifest_sha256 IS NOT NULL AND import_contract_version = '1.0.0' " +
+        "AND recovery_classification IS NULL AND source_ledger_sha256 IS NULL"
+private const val RECOVERED_V2_HISTORY_SQL =
+    "vehicle_claims_authorized = 0 AND import_bundle_id IS NOT NULL " +
+        "AND import_manifest_sha256 IS NOT NULL AND import_contract_version = '2.0.0' " +
+        "AND recovery_classification = 'RECOVERED_PORTABLE_EVIDENCE' " +
+        "AND source_ledger_sha256 IS NOT NULL"
 
 /** String-backed extension keeps unsigned gateway lineage exact across SQLite/Gson boundaries. */
 private data class StoredDiscoveryAuthorizationV1(
@@ -214,6 +298,12 @@ class EvidenceDatabase private constructor(
               envelope BLOB NOT NULL,
               envelope_sha256 TEXT NOT NULL,
               ingested_at TEXT NOT NULL,
+              import_bundle_id TEXT,
+              import_manifest_sha256 TEXT,
+              import_contract_version TEXT,
+              recovery_classification TEXT,
+              source_ledger_sha256 TEXT,
+              vehicle_claims_authorized INTEGER NOT NULL DEFAULT 0,
               FOREIGN KEY(source_id) REFERENCES sources(source_id),
               UNIQUE(vehicle_scope_id, vehicle_profile_revision_id, source_id, source_sequence, message_type, envelope_sha256)
             )
@@ -237,7 +327,16 @@ class EvidenceDatabase private constructor(
               data_length INTEGER NOT NULL,
               data BLOB NOT NULL,
               ingested_at TEXT NOT NULL,
+              import_bundle_id TEXT,
+              import_manifest_sha256 TEXT,
+              import_contract_version TEXT,
+              recovery_classification TEXT,
+              source_ledger_sha256 TEXT,
+              vehicle_claims_authorized INTEGER NOT NULL DEFAULT 0,
+              origin_message_type INTEGER,
+              parent_logical_frame_id INTEGER,
               FOREIGN KEY(source_id) REFERENCES sources(source_id),
+              FOREIGN KEY(parent_logical_frame_id) REFERENCES logical_frames(id),
               UNIQUE(vehicle_scope_id, vehicle_profile_revision_id, source_id, session_id, source_sequence)
             )
             """.trimIndent()
@@ -251,6 +350,10 @@ class EvidenceDatabase private constructor(
               vehicle_profile_revision_id TEXT NOT NULL,
               imported_at TEXT NOT NULL,
               record_count INTEGER NOT NULL,
+              bundle_contract_version TEXT NOT NULL DEFAULT '1.0.0',
+              recovery_classification TEXT,
+              source_ledger_sha256 TEXT,
+              vehicle_claims_authorized INTEGER NOT NULL DEFAULT 0,
               PRIMARY KEY(bundle_id, manifest_sha256, vehicle_scope_id, vehicle_profile_revision_id)
             )
             """.trimIndent()
@@ -263,9 +366,28 @@ class EvidenceDatabase private constructor(
             "CREATE INDEX IF NOT EXISTS can_observations_scope_sequence ON " +
                 "can_observations(vehicle_scope_id, vehicle_profile_revision_id, source_id, source_sequence)"
         )
+        createEvidenceAuthorityIndexes(database)
+    }
+
+    private fun createEvidenceAuthorityIndexes(database: SQLiteDatabase) {
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS logical_frames_v1_export ON " +
+                "logical_frames(vehicle_scope_id, vehicle_profile_revision_id, source_id, id DESC) " +
+                "WHERE recovery_classification IS NULL AND (" +
+                "($LOCAL_AUTHORITY_SQL) OR ($IMPORTED_V1_HISTORY_SQL))"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS can_observations_live_anchor ON " +
+                "can_observations(vehicle_scope_id, vehicle_profile_revision_id, source_id, id DESC) " +
+                "WHERE $LOCAL_AUTHORITY_SQL AND origin_message_type = ${MessageType.RAW_CAN_FRAME.code} " +
+                "AND parent_logical_frame_id IS NOT NULL"
+        )
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        check(database.inTransaction()) {
+            "Evidence database migrations must run inside SQLiteOpenHelper's transaction."
+        }
         var migratedVersion = oldVersion
         if (migratedVersion == 1) {
             createDigitalTwinTables(database)
@@ -298,9 +420,113 @@ class EvidenceDatabase private constructor(
             )
             migratedVersion = 6
         }
+        if (migratedVersion == 6) {
+            addImportedEvidenceAuthorityColumns(database, "logical_frames")
+            addImportedEvidenceAuthorityColumns(database, "can_observations")
+            addColumnIfMissing(
+                database,
+                "import_receipts",
+                "bundle_contract_version",
+                "TEXT NOT NULL DEFAULT '1.0.0'",
+            )
+            addColumnIfMissing(database, "import_receipts", "recovery_classification", "TEXT")
+            addColumnIfMissing(database, "import_receipts", "source_ledger_sha256", "TEXT")
+            addColumnIfMissing(
+                database,
+                "import_receipts",
+                "vehicle_claims_authorized",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            backfillDefiniteLegacyLocalAuthority(database, "logical_frames")
+            backfillDefiniteLegacyLocalAuthority(database, "can_observations")
+            migratedVersion = 7
+        }
+        if (migratedVersion == 7) {
+            addColumnIfMissing(database, "can_observations", "origin_message_type", "INTEGER")
+            addColumnIfMissing(database, "can_observations", "parent_logical_frame_id", "INTEGER")
+            // Pre-v8 rows have no durable parent envelope proof. They intentionally remain NULL
+            // and can be analyzed historically, but can never satisfy a live RAW_CAN anchor.
+            database.execSQL("DROP INDEX IF EXISTS can_observations_live_anchor")
+            createEvidenceAuthorityIndexes(database)
+            migratedVersion = 8
+        }
+        if (migratedVersion == 8) {
+            // Pre-v9 markers did not persist which elapsed-realtime boot produced their clock.
+            // NULL preserves that history without inventing chronology; new appends require an
+            // exact boot identity and legacy rows cannot authorize a completed run.
+            addColumnIfMissing(database, "discovery_event_markers", "observed_boot_id", "TEXT")
+            migratedVersion = 9
+        }
         check(migratedVersion == newVersion) {
             "Evidence database migration $oldVersion -> $newVersion is not implemented; destructive migration is forbidden."
         }
+    }
+
+    private fun addImportedEvidenceAuthorityColumns(database: SQLiteDatabase, table: String) {
+        check(table == "logical_frames" || table == "can_observations")
+        addColumnIfMissing(database, table, "import_bundle_id", "TEXT")
+        addColumnIfMissing(database, table, "import_manifest_sha256", "TEXT")
+        addColumnIfMissing(database, table, "import_contract_version", "TEXT")
+        addColumnIfMissing(database, table, "recovery_classification", "TEXT")
+        addColumnIfMissing(database, table, "source_ledger_sha256", "TEXT")
+        addColumnIfMissing(
+            database,
+            table,
+            "vehicle_claims_authorized",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+    }
+
+    private fun addColumnIfMissing(
+        database: SQLiteDatabase,
+        table: String,
+        column: String,
+        definition: String,
+    ) {
+        check(
+            table == "logical_frames" || table == "can_observations" ||
+                table == "import_receipts" || table == "discovery_event_markers"
+        )
+        val exists = database.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            var found = false
+            while (cursor.moveToNext() && !found) found = cursor.getString(nameIndex) == column
+            found
+        }
+        if (!exists) database.execSQL("ALTER TABLE $table ADD COLUMN $column $definition")
+    }
+
+    /**
+     * Pre-v7 receipts cannot identify individual imported rows. A legacy row is therefore local
+     * only when its source is genuinely validated and its vehicle/profile has no import receipt at
+     * all. Mixed scopes remain non-authoritative rather than guessing row provenance.
+     */
+    private fun backfillDefiniteLegacyLocalAuthority(database: SQLiteDatabase, table: String) {
+        check(table == "logical_frames" || table == "can_observations")
+        val sourceRoleProof = if (table == "logical_frames") {
+            "AND source.role = logical_frames.source_role "
+        } else {
+            "AND source.role = 'OBD_CAN' "
+        }
+        val noRoleCollisionProof =
+            "AND NOT EXISTS (SELECT 1 FROM logical_frames AS conflicting_frame " +
+                "WHERE conflicting_frame.vehicle_scope_id = $table.vehicle_scope_id " +
+                "AND conflicting_frame.vehicle_profile_revision_id = $table.vehicle_profile_revision_id " +
+                "AND conflicting_frame.source_id = $table.source_id " +
+                "AND conflicting_frame.source_role <> source.role) "
+        database.execSQL(
+            "UPDATE $table SET vehicle_claims_authorized = 1 " +
+                "WHERE import_bundle_id IS NULL AND import_manifest_sha256 IS NULL " +
+                "AND import_contract_version IS NULL AND recovery_classification IS NULL " +
+                "AND source_ledger_sha256 IS NULL " +
+                "AND EXISTS (SELECT 1 FROM sources AS source " +
+                "WHERE source.source_id = $table.source_id " +
+                "AND source.bluetooth_address <> 'IMPORTED' " +
+                sourceRoleProof + noRoleCollisionProof + ") " +
+                "AND NOT EXISTS (SELECT 1 FROM import_receipts AS receipt " +
+                "WHERE receipt.vehicle_scope_id = $table.vehicle_scope_id " +
+                "AND receipt.vehicle_profile_revision_id = $table.vehicle_profile_revision_id)"
+        )
     }
 
     private fun createDigitalTwinTables(database: SQLiteDatabase) {
@@ -413,6 +639,7 @@ class EvidenceDatabase private constructor(
               unit TEXT,
               observed_at TEXT NOT NULL,
               elapsed_realtime_nanos TEXT NOT NULL,
+              observed_boot_id TEXT,
               source_id TEXT,
               can_session_id TEXT,
               nearest_source_sequence TEXT,
@@ -517,6 +744,22 @@ class EvidenceDatabase private constructor(
 
     @Synchronized
     fun upsertValidatedSource(source: PersistedSource) {
+        readableDatabase.query(
+            "sources",
+            arrayOf("role"),
+            "source_id = ?",
+            arrayOf(source.sourceId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                require(cursor.getString(0) == source.role.wireValue) {
+                    "A physical evidence source cannot change device roles."
+                }
+            }
+        }
         val values = ContentValues().apply {
             put("source_id", source.sourceId)
             put("role", source.role.wireValue)
@@ -768,22 +1011,41 @@ class EvidenceDatabase private constructor(
             put("envelope", envelope)
             put("envelope_sha256", EvidenceBundles.sha256(envelope))
             put("ingested_at", ingestedAt.toString())
+            putEvidenceAuthority(provenance = null)
         }
-        return writableDatabase.insertWithOnConflict(
-            "logical_frames", null, values, SQLiteDatabase.CONFLICT_IGNORE
-        ) != -1L
+        return insertLogicalFrame(writableDatabase, values).inserted
     }
 
     @Synchronized
     fun persistCanObservation(
         scope: DiscoveryEvidenceScope,
         observation: CanObservation,
+        parentFrame: GatewayFrame,
         ingestedAt: Instant = Instant.now(),
     ): Boolean {
         scope.validate()
         requireSourceRole(writableDatabase, scope.sourceId, DeviceRole.OBD_CAN)
         if (resolveEvidenceScope(writableDatabase, scope.sourceId, DeviceRole.OBD_CAN) != scope) return false
-        return insertCanObservation(writableDatabase, scope, observation, ingestedAt)
+        require(parentFrame.messageType == MessageType.RAW_CAN_FRAME ||
+            parentFrame.messageType == MessageType.CAPTURE_LOG_CHUNK
+        ) { "CAN observation parent must be a RAW_CAN_FRAME or CAPTURE_LOG_CHUNK envelope." }
+        require(parentFrame.decodeCanObservations().any { it == observation }) {
+            "CAN observation is not contained in its declared parent logical frame."
+        }
+        val parentLogicalFrameId = requireParentLogicalFrameId(
+            writableDatabase,
+            scope,
+            parentFrame,
+            requireLocalAuthority = true,
+        )
+        return insertCanObservation(
+            writableDatabase,
+            scope,
+            observation,
+            ingestedAt,
+            originMessageType = parentFrame.messageType,
+            parentLogicalFrameId = parentLogicalFrameId,
+        )
     }
 
     private fun insertCanObservation(
@@ -791,7 +1053,14 @@ class EvidenceDatabase private constructor(
         scope: DiscoveryEvidenceScope,
         observation: CanObservation,
         ingestedAt: Instant,
+        provenance: ImportedEvidenceProvenance? = null,
+        originMessageType: MessageType,
+        parentLogicalFrameId: Long,
     ): Boolean {
+        require(originMessageType == MessageType.RAW_CAN_FRAME ||
+            originMessageType == MessageType.CAPTURE_LOG_CHUNK
+        ) { "Persisted CAN origin must be RAW_CAN_FRAME or CAPTURE_LOG_CHUNK." }
+        require(parentLogicalFrameId > 0) { "Persisted CAN evidence requires a parent logical frame." }
         val values = ContentValues().apply {
             put("vehicle_scope_id", scope.vehicleScopeId)
             put("vehicle_profile_revision_id", scope.vehicleProfileRevisionId)
@@ -807,10 +1076,138 @@ class EvidenceDatabase private constructor(
             put("data_length", observation.dataLength)
             put("data", observation.data)
             put("ingested_at", ingestedAt.toString())
+            put("origin_message_type", originMessageType.code)
+            put("parent_logical_frame_id", parentLogicalFrameId)
+            putEvidenceAuthority(provenance)
         }
-        return database.insertWithOnConflict(
-            "can_observations", null, values, SQLiteDatabase.CONFLICT_IGNORE
-        ) != -1L
+        val identityArguments = arrayOf(
+            scope.vehicleScopeId,
+            scope.vehicleProfileRevisionId,
+            scope.sourceId,
+            observation.sessionId.toString(),
+            observation.sourceSequence.toString(),
+        )
+        database.query(
+            "can_observations",
+            arrayOf(
+                "source_monotonic_us", "bitrate_bps", "identifier", "extended",
+                "remote_request", "listen_only", "data_length", "data",
+                "origin_message_type", "parent_logical_frame_id",
+            ),
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND session_id = ? AND source_sequence = ?",
+            identityArguments,
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                val exactDuplicate =
+                    cursor.getString(0) == observation.monotonicMicroseconds.toString() &&
+                        cursor.getInt(1) == observation.bitrateBps &&
+                        cursor.getLong(2) == observation.identifier.toLong() &&
+                        cursor.getInt(3) == (if (observation.extended) 1 else 0) &&
+                        cursor.getInt(4) == (if (observation.remoteRequest) 1 else 0) &&
+                        cursor.getInt(5) == (if (observation.listenOnly) 1 else 0) &&
+                        cursor.getInt(6) == observation.dataLength &&
+                        cursor.getBlob(7).contentEquals(observation.data)
+                require(exactDuplicate) {
+                    "Contradictory CAN evidence reuses a physical source/session/sequence identity."
+                }
+                // One physical bus observation can be delivered live and later appear in a
+                // retained-log envelope. Its first durable parent remains canonical; a second
+                // byte-identical delivery is idempotent, while any physical-field difference is
+                // a contradiction that rolls back the enclosing import transaction.
+                return false
+            }
+        }
+        database.insertOrThrow("can_observations", null, values)
+        return true
+    }
+
+    /**
+     * A gateway sequence can restart after power loss, so the physical logical-frame identity also
+     * includes its gateway monotonic clock. Replaying the exact same envelope is idempotent;
+     * changing any envelope-bearing field for that identity is contradictory evidence.
+     */
+    private fun insertLogicalFrame(
+        database: SQLiteDatabase,
+        values: ContentValues,
+    ): LogicalFrameInsertResult {
+        val identityArguments = arrayOf(
+            values.getAsString("vehicle_scope_id"),
+            values.getAsString("vehicle_profile_revision_id"),
+            values.getAsString("source_id"),
+            values.getAsString("source_sequence"),
+            values.getAsString("source_monotonic_us"),
+        )
+        database.query(
+            "logical_frames",
+            arrayOf(
+                "id", "source_role", "protocol_major", "protocol_minor", "message_type",
+                "flags", "envelope_sha256", "envelope",
+            ),
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND source_sequence = ? AND source_monotonic_us = ?",
+            identityArguments,
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            var existingId: Long? = null
+            while (cursor.moveToNext()) {
+                val exactDuplicate =
+                    cursor.getString(1) == values.getAsString("source_role") &&
+                        cursor.getInt(2) == values.getAsInteger("protocol_major") &&
+                        cursor.getInt(3) == values.getAsInteger("protocol_minor") &&
+                        cursor.getInt(4) == values.getAsInteger("message_type") &&
+                        cursor.getInt(5) == values.getAsInteger("flags") &&
+                        cursor.getString(6) == values.getAsString("envelope_sha256") &&
+                        cursor.getBlob(7).contentEquals(values.getAsByteArray("envelope"))
+                require(exactDuplicate) {
+                    "Contradictory logical-frame evidence reuses a physical source/clock identity."
+                }
+                existingId = cursor.getLong(0)
+            }
+            existingId?.let { return LogicalFrameInsertResult(it, inserted = false) }
+        }
+        return LogicalFrameInsertResult(
+            rowId = database.insertOrThrow("logical_frames", null, values),
+            inserted = true,
+        )
+    }
+
+    private fun requireParentLogicalFrameId(
+        database: SQLiteDatabase,
+        scope: DiscoveryEvidenceScope,
+        frame: GatewayFrame,
+        requireLocalAuthority: Boolean,
+    ): Long {
+        val authorityClause = if (requireLocalAuthority) " AND $LOCAL_AUTHORITY_SQL" else ""
+        return database.query(
+            "logical_frames",
+            arrayOf("id"),
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND source_sequence = ? AND source_monotonic_us = ? AND message_type = ?" +
+                authorityClause,
+            scope.queryArguments() + arrayOf(
+                frame.sequence.toString(),
+                frame.monotonicMicroseconds.toString(),
+                frame.messageType.code.toString(),
+            ),
+            null,
+            null,
+            null,
+            "2",
+        ).use { cursor ->
+            require(cursor.moveToFirst()) {
+                "CAN observation parent logical frame is not durably persisted with matching authority."
+            }
+            val id = cursor.getLong(0)
+            require(!cursor.moveToNext()) { "CAN observation parent logical-frame identity is ambiguous." }
+            id
+        }
     }
 
     @Synchronized
@@ -833,7 +1230,9 @@ class EvidenceDatabase private constructor(
                 "vehicle_scope_id", "vehicle_profile_revision_id", "source_id", "session_id",
                 "source_sequence", "source_monotonic_us",
                 "bitrate_bps", "identifier", "extended", "remote_request", "listen_only",
-                "data_length", "data",
+                "data_length", "data", "import_bundle_id", "import_manifest_sha256",
+                "import_contract_version", "recovery_classification", "source_ledger_sha256",
+                "vehicle_claims_authorized", "origin_message_type", "parent_logical_frame_id",
             ),
             "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
             scope.queryArguments(),
@@ -864,6 +1263,19 @@ class EvidenceDatabase private constructor(
                         dataLength = dataLength,
                         data = data,
                     ),
+                    provenance = cursor.persistedEvidenceProvenance(
+                        importBundleIndex = 13,
+                        importManifestIndex = 14,
+                        importContractIndex = 15,
+                        recoveryClassificationIndex = 16,
+                        sourceLedgerIndex = 17,
+                        authorityIndex = 18,
+                    ),
+                    originMessageType = cursor.nullableLong(19)?.let { code ->
+                        MessageType.entries.firstOrNull { it.code == code.toInt() }
+                            ?: throw IllegalArgumentException("Persisted CAN origin message type is invalid.")
+                    },
+                    parentLogicalFrameId = cursor.nullableLong(20),
                 )
             }
         }
@@ -879,7 +1291,23 @@ class EvidenceDatabase private constructor(
                COUNT(DISTINCT source_id || ':' || session_id),
                COUNT(DISTINCT extended || ':' || identifier),
                MIN(ingested_at),
-               MAX(ingested_at)
+               MAX(ingested_at),
+               SUM(CASE WHEN $LOCAL_AUTHORITY_SQL
+                        THEN 1 ELSE 0 END),
+               COUNT(DISTINCT CASE
+                   WHEN $LOCAL_AUTHORITY_SQL
+                   THEN extended || ':' || identifier END),
+               SUM(CASE WHEN $IMPORTED_V1_HISTORY_SQL
+                        THEN 1 ELSE 0 END),
+               SUM(CASE WHEN $RECOVERED_V2_HISTORY_SQL
+                        THEN 1 ELSE 0 END),
+               SUM(CASE WHEN NOT (
+                       $LOCAL_AUTHORITY_SQL
+                   ) AND NOT (
+                       $IMPORTED_V1_HISTORY_SQL
+                   ) AND NOT (
+                       $RECOVERED_V2_HISTORY_SQL
+                   ) THEN 1 ELSE 0 END)
         FROM can_observations
         WHERE vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?
         """.trimIndent(),
@@ -892,21 +1320,29 @@ class EvidenceDatabase private constructor(
             uniqueCanIdentifiers = cursor.getInt(2),
             firstIngestedAt = cursor.nullableString(3),
             lastIngestedAt = cursor.nullableString(4),
+            localAuthorizedCanObservations = cursor.getLong(5),
+            localAuthorizedUniqueCanIdentifiers = cursor.getInt(6),
+            importedV1CanObservations = cursor.getLong(7),
+            recoveredV2CanObservations = cursor.getLong(8),
+            ambiguousLegacyCanObservations = cursor.getLong(9),
         )
     }
     }
 
+    /** Counts only locally captured rows eligible for live capture/test lineage. */
     @Synchronized
     fun evidenceCounts(scope: DiscoveryEvidenceScope): EvidenceCounts {
         scope.validate()
         val logical = readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM logical_frames WHERE " +
-                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND $LOCAL_AUTHORITY_SQL",
             scope.queryArguments(),
         ).use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
         val can = readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM can_observations WHERE " +
-                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+                "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND $LOCAL_AUTHORITY_SQL",
             scope.queryArguments(),
         ).use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
         return EvidenceCounts(logical, can)
@@ -971,7 +1407,7 @@ class EvidenceDatabase private constructor(
     ) {
         val role = database.query(
             "sources",
-            arrayOf("role"),
+            arrayOf("role", "bluetooth_address"),
             "source_id = ?",
             arrayOf(sourceId),
             null,
@@ -980,6 +1416,9 @@ class EvidenceDatabase private constructor(
             "1",
         ).use { cursor ->
             require(cursor.moveToFirst()) { "Evidence source is not validated." }
+            require(cursor.getString(1) != "IMPORTED") {
+                "Imported evidence sources cannot be promoted to live acquisition authority."
+            }
             cursor.getString(0)
         }
         require(role == expectedRole.wireValue) {
@@ -1004,7 +1443,9 @@ class EvidenceDatabase private constructor(
         return readableDatabase.query(
             "can_observations",
             arrayOf("source_id", "session_id", "source_sequence", "source_monotonic_us"),
-            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND origin_message_type = ${MessageType.RAW_CAN_FRAME.code} " +
+                "AND parent_logical_frame_id IS NOT NULL AND $LOCAL_AUTHORITY_SQL",
             scope.queryArguments(),
             null,
             null,
@@ -1040,7 +1481,9 @@ class EvidenceDatabase private constructor(
             "can_observations",
             arrayOf("id"),
             "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
-                "AND session_id = ? AND source_sequence = ? AND source_monotonic_us = ?",
+                "AND session_id = ? AND source_sequence = ? AND source_monotonic_us = ? " +
+                "AND origin_message_type = ${MessageType.RAW_CAN_FRAME.code} " +
+                "AND parent_logical_frame_id IS NOT NULL AND $LOCAL_AUTHORITY_SQL",
             scope.queryArguments() + arrayOf(
                 anchor.canSessionId.toString(),
                 anchor.sourceSequence.toString(),
@@ -1145,6 +1588,7 @@ class EvidenceDatabase private constructor(
                     )) { "Selector bootstrap final RAW_CAN lineage is not retained." }
                 }
             }
+            requireFinalMarkerChronology(database, stored, session)
             require(
                 stored.vehicleScopeId == session.vehicleScopeId &&
                     stored.vehicleProfileRevisionId == session.vehicleProfileRevisionId &&
@@ -1208,6 +1652,7 @@ class EvidenceDatabase private constructor(
                 "AndroidDiscoveryMarkerRecord can only be appended to an active AndroidDiscoveryCaptureDraft."
             }
             val captureScope = capture.evidenceScope()
+            requireMarkerChronology(database, capture, marker, captureScope)
             require(marker.safetyAuthorization.sourceId == captureScope.sourceId &&
                 marker.safetyAuthorization.mutationAuthority ==
                 capture.safetyAuthorization.mutationAuthority
@@ -1243,6 +1688,7 @@ class EvidenceDatabase private constructor(
                 putNullable("unit", marker.unit)
                 put("observed_at", marker.observedAt)
                 put("elapsed_realtime_nanos", marker.elapsedRealtimeNanos.toString())
+                put("observed_boot_id", requireNotNull(marker.observedBootId))
                 putAnchor(null, marker.evidenceAnchor)
                 put("observer", marker.observer)
                 putNullable("note", marker.note)
@@ -1300,8 +1746,8 @@ class EvidenceDatabase private constructor(
             "discovery_event_markers",
             arrayOf(
                 "marker_id", "capture_session_id", "event_type", "label", "marker_kind",
-                "value_text", "unit", "observed_at", "elapsed_realtime_nanos", "source_id",
-                "can_session_id", "nearest_source_sequence", "nearest_gateway_monotonic_us",
+                "value_text", "unit", "observed_at", "elapsed_realtime_nanos", "observed_boot_id",
+                "source_id", "can_session_id", "nearest_source_sequence", "nearest_gateway_monotonic_us",
                 "observer", "note", "safety_authorization_source_id",
                 "safety_authorization_frame_sequence",
                 "safety_authorization_gateway_monotonic_us",
@@ -1324,10 +1770,11 @@ class EvidenceDatabase private constructor(
                     unit = cursor.nullableString(6),
                     observedAt = cursor.getString(7),
                     elapsedRealtimeNanos = cursor.getString(8).toLong(),
-                    evidenceAnchor = cursor.anchor(9, 10, 11, 12),
-                    observer = cursor.getString(13),
-                    note = cursor.nullableString(14),
-                    safetyAuthorization = cursor.safetyAuthorization(15, 16, 17, 18, 19),
+                    observedBootId = cursor.nullableString(9),
+                    evidenceAnchor = cursor.anchor(10, 11, 12, 13),
+                    observer = cursor.getString(14),
+                    note = cursor.nullableString(15),
+                    safetyAuthorization = cursor.safetyAuthorization(16, 17, 18, 19, 20),
                 ).validate()
             }
         }
@@ -1487,6 +1934,135 @@ class EvidenceDatabase private constructor(
             null,
             "1",
         ).use { cursor -> if (!cursor.moveToFirst()) null else captureSession(cursor) }
+
+    private fun requireMarkerChronology(
+        database: SQLiteDatabase,
+        capture: AndroidDiscoveryCaptureDraft,
+        marker: AndroidDiscoveryMarkerRecord,
+        scope: DiscoveryEvidenceScope,
+    ) {
+        val markerBootId = requireNotNull(marker.observedBootId) {
+            "New Discovery markers require a durable elapsed-realtime boot identity."
+        }
+        require(markerBootId == capture.startedBootId) {
+            "Discovery marker boot identity changed during an active capture."
+        }
+        require(marker.elapsedRealtimeNanos > capture.startedElapsedRealtimeNanos) {
+            "Discovery marker monotonic clock must advance beyond capture start."
+        }
+        val markerInstant = Instant.parse(marker.observedAt)
+        require(!markerInstant.isBefore(Instant.parse(capture.startedAt))) {
+            "Discovery marker wall clock precedes capture start."
+        }
+        val last = lastMarkerChronology(database, capture.sessionId)
+        last?.let { prior ->
+            require(prior.observedBootId != null && prior.observedBootId == markerBootId) {
+                "Discovery marker chronology crosses unknown or different boot identity."
+            }
+            require(marker.elapsedRealtimeNanos > prior.elapsedRealtimeNanos) {
+                "Discovery marker monotonic clock must strictly advance."
+            }
+            require(!markerInstant.isBefore(prior.observedAt)) {
+                "Discovery marker wall clock moved backwards."
+            }
+        }
+        marker.evidenceAnchor?.let { anchor ->
+            require(anchor.sourceId == scope.sourceId &&
+                containsDiscoveryEvidenceAnchor(database, scope, anchor)
+            ) { "Discovery marker RAW_CAN lineage is not locally retained." }
+            val priorAnchor = last?.evidenceAnchor ?: capture.startAnchor
+            priorAnchor?.let {
+                require(anchor.strictlyFollows(it)) {
+                    "Discovery marker RAW_CAN anchor must strictly advance on one capture timeline."
+                }
+            }
+        }
+        require(marker.evidenceAnchor != null ||
+            (last?.evidenceAnchor == null && capture.startAnchor == null)
+        ) { "Discovery marker cannot discard an established RAW_CAN anchor timeline." }
+    }
+
+    private fun requireFinalMarkerChronology(
+        database: SQLiteDatabase,
+        stored: AndroidDiscoveryCaptureDraft,
+        final: AndroidDiscoveryCaptureDraft,
+    ) {
+        val last = lastMarkerChronology(database, stored.sessionId) ?: return
+        val finalBootId = requireNotNull(final.endedBootId)
+        if (last.observedBootId == null) {
+            require(final.state == AndroidCaptureDraftState.ABORTED) {
+                "A pre-v9 marker with unknown boot chronology cannot authorize completion."
+            }
+            return
+        }
+        if (last.observedBootId != finalBootId) {
+            require(final.state == AndroidCaptureDraftState.ABORTED &&
+                final.finalizationAuthority == AndroidCaptureFinalizationAuthority.INTERRUPTED_BY_REBOOT
+            ) { "Discovery completion cannot cross marker boot identity." }
+            return
+        }
+        val selectorCompletion = final.state == AndroidCaptureDraftState.COMPLETED &&
+            stored.safetyAuthorization.mutationAuthority ==
+            AndroidDiscoveryMutationAuthority.PASSIVE_PARK_SELECTOR_BOOTSTRAP
+        val finalElapsedRealtimeNanos = requireNotNull(final.endedElapsedRealtimeNanos)
+        require(
+            if (selectorCompletion) {
+                finalElapsedRealtimeNanos > last.elapsedRealtimeNanos
+            } else {
+                finalElapsedRealtimeNanos >= last.elapsedRealtimeNanos
+            }
+        ) {
+            if (selectorCompletion) {
+                "Selector bootstrap final monotonic clock must strictly advance beyond the last marker."
+            } else {
+                "Discovery final monotonic clock precedes the last marker."
+            }
+        }
+        require(!Instant.parse(requireNotNull(final.endedAt)).isBefore(last.observedAt)) {
+            "Discovery final wall clock precedes the last marker."
+        }
+        last.evidenceAnchor?.let { markerAnchor ->
+            requireNotNull(final.endAnchor).also { endAnchor ->
+                require(
+                    if (selectorCompletion) {
+                        endAnchor.strictlyFollows(markerAnchor)
+                    } else {
+                        endAnchor.isAtOrAfter(markerAnchor)
+                    }
+                ) {
+                    if (selectorCompletion) {
+                        "Selector bootstrap final RAW_CAN anchor must strictly advance beyond the last marker."
+                    } else {
+                        "Discovery final RAW_CAN anchor precedes or changes the last marker timeline."
+                    }
+                }
+            }
+        }
+    }
+
+    private fun lastMarkerChronology(
+        database: SQLiteDatabase,
+        captureSessionId: String,
+    ): PersistedMarkerChronology? = database.query(
+        "discovery_event_markers",
+        arrayOf(
+            "observed_at", "elapsed_realtime_nanos", "observed_boot_id", "source_id",
+            "can_session_id", "nearest_source_sequence", "nearest_gateway_monotonic_us",
+        ),
+        "capture_session_id = ?",
+        arrayOf(captureSessionId),
+        null,
+        null,
+        "rowid DESC",
+        "1",
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else PersistedMarkerChronology(
+            observedAt = Instant.parse(cursor.getString(0)),
+            elapsedRealtimeNanos = cursor.getString(1).toLong(),
+            observedBootId = cursor.nullableString(2),
+            evidenceAnchor = cursor.anchor(3, 4, 5, 6),
+        )
+    }
 
     private fun persistedDiscoveryCapture(
         database: SQLiteDatabase,
@@ -1651,6 +2227,24 @@ class EvidenceDatabase private constructor(
         if (value == null) putNull(column) else put(column, value)
     }
 
+    private fun ContentValues.putEvidenceAuthority(provenance: ImportedEvidenceProvenance?) {
+        if (provenance == null) {
+            putNull("import_bundle_id")
+            putNull("import_manifest_sha256")
+            putNull("import_contract_version")
+            putNull("recovery_classification")
+            putNull("source_ledger_sha256")
+            put("vehicle_claims_authorized", 1)
+        } else {
+            put("import_bundle_id", provenance.bundleId)
+            put("import_manifest_sha256", provenance.manifestSha256)
+            put("import_contract_version", provenance.contractVersion)
+            putNullable("recovery_classification", provenance.recoveryClassification)
+            putNullable("source_ledger_sha256", provenance.sourceLedgerSha256)
+            put("vehicle_claims_authorized", if (provenance.vehicleClaimsAuthorized) 1 else 0)
+        }
+    }
+
     private fun Cursor.anchor(
         sourceIndex: Int,
         sessionIndex: Int,
@@ -1672,13 +2266,53 @@ class EvidenceDatabase private constructor(
     private fun Cursor.nullableLong(index: Int): Long? =
         if (isNull(index)) null else getLong(index)
 
+    private fun Cursor.persistedEvidenceProvenance(
+        importBundleIndex: Int,
+        importManifestIndex: Int,
+        importContractIndex: Int,
+        recoveryClassificationIndex: Int,
+        sourceLedgerIndex: Int,
+        authorityIndex: Int,
+    ): PersistedEvidenceProvenance {
+        val importBundleId = nullableString(importBundleIndex)
+        val importManifestSha256 = nullableString(importManifestIndex)
+        val importContractVersion = nullableString(importContractIndex)
+        val recoveryClassification = nullableString(recoveryClassificationIndex)
+        val sourceLedgerSha256 = nullableString(sourceLedgerIndex)
+        val vehicleClaimsAuthorized = getInt(authorityIndex) == 1
+        val classification = when {
+            vehicleClaimsAuthorized && importManifestSha256 == null ->
+                DiscoveryEvidenceProvenance.LOCAL_AUTHORIZED
+            !vehicleClaimsAuthorized && recoveryClassification == null &&
+                importContractVersion == EvidenceBundleManifest.CONTRACT_VERSION_V1 &&
+                importManifestSha256 != null -> DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY
+            !vehicleClaimsAuthorized &&
+                recoveryClassification == RecoveryEvidenceMetadata.CLASSIFICATION &&
+                importContractVersion == EvidenceBundleManifest.CONTRACT_VERSION_V2 &&
+                importManifestSha256 != null -> DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY
+            else -> DiscoveryEvidenceProvenance.AMBIGUOUS_LEGACY_HISTORY
+        }
+        return PersistedEvidenceProvenance(
+            classification = classification,
+            importBundleId = importBundleId,
+            importManifestSha256 = importManifestSha256,
+            importContractVersion = importContractVersion,
+            recoveryClassification = recoveryClassification,
+            sourceLedgerSha256 = sourceLedgerSha256,
+            vehicleClaimsAuthorized = vehicleClaimsAuthorized,
+        ).validate()
+    }
+
+    /** Ordinary v1 sync remains transitive, but recovery-classified v2 rows cannot be laundered. */
     @Synchronized
-    fun recentPortableFrames(
+    fun recentPortableFramesForV1Export(
         scope: DiscoveryEvidenceScope,
         limit: Int = 20_000,
     ): List<PortableEvidenceRecord> {
         scope.validate()
-        require(limit in 1..100_000)
+        require(limit in 1..20_000) {
+            "A portable v1 export is bounded to the 20,000-record bundle interchange window."
+        }
         val records = mutableListOf<PortableEvidenceRecord>()
         readableDatabase.query(
             "logical_frames",
@@ -1687,7 +2321,21 @@ class EvidenceDatabase private constructor(
                 "protocol_major", "protocol_minor", "message_type", "flags", "ingested_at",
                 "envelope_sha256", "envelope",
             ),
-            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ?",
+            "vehicle_scope_id = ? AND vehicle_profile_revision_id = ? AND source_id = ? " +
+                "AND EXISTS (SELECT 1 FROM sources AS source WHERE " +
+                "source.source_id = logical_frames.source_id " +
+                "AND source.role = logical_frames.source_role) " +
+                "AND recovery_classification IS NULL AND (" +
+                "($LOCAL_AUTHORITY_SQL) OR (($IMPORTED_V1_HISTORY_SQL) " +
+                "AND EXISTS (SELECT 1 FROM import_receipts AS receipt WHERE " +
+                "receipt.bundle_id = logical_frames.import_bundle_id " +
+                "AND receipt.manifest_sha256 = logical_frames.import_manifest_sha256 " +
+                "AND receipt.vehicle_scope_id = logical_frames.vehicle_scope_id " +
+                "AND receipt.vehicle_profile_revision_id = logical_frames.vehicle_profile_revision_id " +
+                "AND receipt.bundle_contract_version = '1.0.0' " +
+                "AND receipt.recovery_classification IS NULL " +
+                "AND receipt.source_ledger_sha256 IS NULL " +
+                "AND receipt.vehicle_claims_authorized = 0)))",
             scope.queryArguments(),
             null,
             null,
@@ -1721,6 +2369,7 @@ class EvidenceDatabase private constructor(
         importedAt: Instant = Instant.now(),
     ): Int {
         scope.validate()
+        val provenance = importedEvidenceProvenance(bundle)
         val database = writableDatabase
         database.beginTransaction()
         try {
@@ -1775,11 +2424,10 @@ class EvidenceDatabase private constructor(
                     put("envelope", envelope)
                     put("envelope_sha256", record.envelopeSha256.lowercase())
                     put("ingested_at", record.ingestedAt)
+                    putEvidenceAuthority(provenance)
                 }
-                if (database.insertWithOnConflict(
-                        "logical_frames", null, values, SQLiteDatabase.CONFLICT_IGNORE
-                    ) != -1L
-                ) inserted++
+                val logicalFrame = insertLogicalFrame(database, values)
+                if (logicalFrame.inserted) inserted++
                 if (role == DeviceRole.OBD_CAN) {
                     val evidenceIngestedAt = try {
                         Instant.parse(record.ingestedAt)
@@ -1800,6 +2448,9 @@ class EvidenceDatabase private constructor(
                             recordScope,
                             observation,
                             evidenceIngestedAt,
+                            provenance,
+                            originMessageType = frame.messageType,
+                            parentLogicalFrameId = logicalFrame.rowId,
                         )
                     }
                 }
@@ -1811,6 +2462,10 @@ class EvidenceDatabase private constructor(
                 put("vehicle_profile_revision_id", scope.vehicleProfileRevisionId)
                 put("imported_at", importedAt.toString())
                 put("record_count", bundle.records.size)
+                put("bundle_contract_version", provenance.contractVersion)
+                putNullable("recovery_classification", provenance.recoveryClassification)
+                putNullable("source_ledger_sha256", provenance.sourceLedgerSha256)
+                put("vehicle_claims_authorized", if (provenance.vehicleClaimsAuthorized) 1 else 0)
             })
             database.setTransactionSuccessful()
             return inserted
@@ -1819,19 +2474,74 @@ class EvidenceDatabase private constructor(
         }
     }
 
+    private fun importedEvidenceProvenance(bundle: ImportedEvidenceBundle): ImportedEvidenceProvenance {
+        require(!bundle.isLiveAuthority) { "Imported evidence cannot declare live authority." }
+        require(bundle.manifest.contract == EvidenceBundleManifest.CONTRACT) {
+            "Imported evidence contract is unsupported."
+        }
+        require(bundle.manifestSha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "Imported evidence manifest SHA-256 is invalid."
+        }
+        val recovery = bundle.recoveryMetadata
+        require(bundle.manifest.recovery == recovery) {
+            "Imported evidence recovery metadata does not match its manifest."
+        }
+        when (bundle.manifest.contractVersion) {
+            EvidenceBundleManifest.CONTRACT_VERSION_V1 -> require(recovery == null) {
+                "A v1 import cannot carry recovery metadata."
+            }
+
+            EvidenceBundleManifest.CONTRACT_VERSION_V2 -> {
+                requireNotNull(recovery) { "A v2 import requires recovery metadata." }
+                require(recovery.classification == RecoveryEvidenceMetadata.CLASSIFICATION &&
+                    !recovery.vehicleClaimsAuthorized &&
+                    recovery.sourceLedgerSha256.matches(Regex("^[0-9a-f]{64}$")) &&
+                    bundle.manifest.segments.size == 1 &&
+                    bundle.manifest.segments.single().sha256 == recovery.sourceLedgerSha256
+                ) { "A v2 import recovery declaration is invalid." }
+            }
+
+            else -> throw IllegalArgumentException("Imported evidence contract version is unsupported.")
+        }
+        return ImportedEvidenceProvenance(
+            bundleId = bundle.manifest.bundleId,
+            manifestSha256 = bundle.manifestSha256,
+            contractVersion = bundle.manifest.contractVersion,
+            recoveryClassification = recovery?.classification,
+            sourceLedgerSha256 = recovery?.sourceLedgerSha256,
+        )
+    }
+
     private fun ensureImportedSource(
         database: SQLiteDatabase,
         sourceId: String,
         role: DeviceRole,
         importedAt: Instant,
     ) {
-        database.insertWithOnConflict("sources", null, ContentValues().apply {
+        database.query(
+            "sources",
+            arrayOf("role"),
+            "source_id = ?",
+            arrayOf(sourceId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                require(cursor.getString(0) == role.wireValue) {
+                    "Imported evidence source role conflicts with the existing physical identity."
+                }
+                return
+            }
+        }
+        database.insertOrThrow("sources", null, ContentValues().apply {
             put("source_id", sourceId)
             put("role", role.wireValue)
             put("bluetooth_address", "IMPORTED")
             put("identity_json", "{\"evidence_source\":\"cross-platform-import\"}")
             put("validated_at", importedAt.toString())
-        }, SQLiteDatabase.CONFLICT_IGNORE)
+        })
     }
 
     private fun scalarCount(table: String): Long = readableDatabase
@@ -1849,7 +2559,7 @@ class EvidenceDatabase private constructor(
 
     companion object {
         internal const val DATABASE_NAME = "vhos-evidence.db"
-        private const val DATABASE_VERSION = 6
+        private const val DATABASE_VERSION = 9
         private val CAPTURE_SESSION_COLUMNS = arrayOf(
             "session_id", "vehicle_scope_id", "vehicle_profile_revision_id", "capture_source_id",
             "test_template_id", "test_template_version", "test_template_snapshot_json",

@@ -2,7 +2,7 @@
   "contract": "can.signal-hypothesis-pack",
   "contract_version": "1.0.0",
   "pack_id": "toyota.4runner.2005.passive-can-hypotheses",
-  "pack_version": "0.4.0",
+  "pack_version": "0.4.1",
   "target": {
     "make": "Toyota",
     "model": "4Runner",
@@ -411,7 +411,7 @@
         "Capture released, light, medium, and firm brake applications with Techstream pressure or an independent pressure reference.",
         "Resolve bit placement and physical-unit scale before creating a signal definition."
       ],
-      "limitations": "Every retained target frame is zero in the candidate field, so current evidence cannot test pressure response. Cross-model DBCs also disagree materially on field placement and scale; no pressure unit is accepted."
+      "limitations": "Cross-model DBCs disagree materially on field placement and scale. Target evidence must exercise released, light, medium, and firm braking with a synchronized independent reference before any field placement, pressure unit, or physical meaning is accepted."
     },
     {
       "hypothesis_id": "toyota.223.brake-stop-light.id-only",

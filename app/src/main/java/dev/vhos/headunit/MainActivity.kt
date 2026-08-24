@@ -331,8 +331,13 @@ class MainActivity : Activity() {
                 val scope = requireNotNull(
                     store.resolveDiscoveryEvidenceScope(HeadUnitRuntime.snapshot().obd.sourceId)
                 ) { "Vehicle/source scope is unresolved; export cannot mix vehicle evidence." }
-                val records = store.recentPortableFrames(scope)
-                if (records.isEmpty()) throw IllegalStateException("No validated logical frames are stored yet.")
+                val records = store.recentPortableFramesForV1Export(scope)
+                if (records.isEmpty()) {
+                    throw IllegalStateException(
+                        "No ordinary v1 logical frames are eligible for export; recovered v2 " +
+                            "history requires an explicit recovery export path."
+                    )
+                }
                 pendingExport = EvidenceBundles.toByteArray(
                     records = records,
                     creator = BundleCreator(
@@ -618,7 +623,15 @@ class MainActivity : Activity() {
                 HeadUnitRuntime.markImport(System.currentTimeMillis())
                 refreshCounts()
                 refreshDiscovery()
-                showToast("Verified ${bundle.records.size} records; appended $inserted new frames.")
+                val importLabel = if (bundle.recoveryMetadata != null) {
+                    "Recovered portable evidence"
+                } else {
+                    "Portable history"
+                }
+                showToast(
+                    "$importLabel verified ${bundle.records.size} records; appended $inserted new frames. " +
+                        "Imported rows are historical only and authorize no vehicle controls."
+                )
             } catch (error: Exception) {
                 showError(error)
             }
@@ -665,7 +678,9 @@ class MainActivity : Activity() {
                     return@Thread
                 }
                 val persisted = store.recentCanObservations(scope, DISCOVERY_RECORD_LIMIT)
-                val observations = persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
+                val observations = persisted.map {
+                    DiscoveryObservation(it.sourceId, it.observation, it.provenance.classification)
+                }
                 val report = CanDiscoveryAnalyzer.analyze(observations)
                 val hypothesisResult = runCatching {
                     val pack = SignalHypothesisCatalog.loadBundled()
@@ -714,6 +729,13 @@ class MainActivity : Activity() {
             "${acquisition.records} analyzed of $totalRows retained • " +
                 "${acquisition.sessions} sessions • ${acquisition.uniqueIdentifiers} identifiers"
         )
+        acquisition.provenance.let { provenance ->
+            appendLine(
+                "Authority local ${provenance.localAuthorizedRecords} • imported-v1 " +
+                    "${provenance.importedV1Records} • recovered-v2 ${provenance.recoveredV2Records} • " +
+                    "ambiguous ${provenance.ambiguousLegacyRecords}"
+            )
+        }
         appendLine(
             "${acquisition.bitratesBps.joinToString { "${it / 1_000} kbit/s" }} • " +
                 "listen-only ${acquisition.listenOnlyRecords}/${acquisition.records} • " +
@@ -881,7 +903,9 @@ class MainActivity : Activity() {
                 }
                 var priorCaptureOffset = 0UL
                 val report = HistoricalCanReplay.run(
-                    input = persisted.map { DiscoveryObservation(it.sourceId, it.observation) },
+                    input = persisted.map {
+                        DiscoveryObservation(it.sourceId, it.observation, it.provenance.classification)
+                    },
                     repeat = repeat,
                     shouldContinue = {
                         !activityDestroyed && replayRunning && replayGeneration == generation &&
@@ -970,6 +994,7 @@ class MainActivity : Activity() {
                     "Source timeline ${decimal(progress.sourceCaptureOffsetMicroseconds.toDouble() / 1_000_000.0)} s • " +
                         "recoveries ${progress.decoderRecoveries} • discarded ${progress.decoderDiscardedBytes} bytes"
                 )
+                appendLine("Evidence provenance ${progress.provenance}")
                 append("Interpretation locked: this is recorded raw evidence, not current vehicle state.")
             }
             replayCard.setTextColor(levelColor(IndicatorLevel.ACTIVE))
@@ -1002,6 +1027,13 @@ class MainActivity : Activity() {
                 appendLine(
                     "Order + payload identity ${if (report.exactRecordOrderAndPayloadMatch) "VERIFIED" else "FAILED"}"
                 )
+                report.provenance.let { provenance ->
+                    appendLine(
+                        "Authority local ${provenance.localAuthorizedRecords} • imported-v1 " +
+                            "${provenance.importedV1Records} • recovered-v2 ${provenance.recoveredV2Records} • " +
+                            "ambiguous ${provenance.ambiguousLegacyRecords}"
+                    )
+                }
                 append("No replayed identifier or byte field is promoted to a vehicle meaning or health conclusion.")
             }
             replayCard.setTextColor(
@@ -1045,7 +1077,9 @@ class MainActivity : Activity() {
                     )
                 }
                 val report = LinkReliabilityLab.run(
-                    input = persisted.map { DiscoveryObservation(it.sourceId, it.observation) },
+                    input = persisted.map {
+                        DiscoveryObservation(it.sourceId, it.observation, it.provenance.classification)
+                    },
                     soakCycles = RELIABILITY_SOAK_CYCLES,
                     shouldContinue = {
                         !activityDestroyed && reliabilityRunning &&
@@ -1118,6 +1152,14 @@ class MainActivity : Activity() {
                     "Expected healthy ${report.healthyScenarios} • correctly degraded " +
                         "${report.degradedScenarios} • max decoder buffer $maximumBuffer bytes"
                 )
+                report.provenance.let { provenance ->
+                    appendLine(
+                        "Authority local ${provenance.localAuthorizedRecords} • imported-v1 " +
+                            "${provenance.importedV1Records} • recovered-v2 " +
+                            "${provenance.recoveredV2Records} • ambiguous " +
+                            provenance.ambiguousLegacyRecords
+                    )
+                }
                 report.scenarios.forEach { scenario ->
                     appendLine(
                         "${scenario.scenario.name.replace('_', '-')}  " +
@@ -1164,7 +1206,7 @@ class MainActivity : Activity() {
                 val security = store.securityStatus
                 appendLine("LOCAL EVIDENCE  ${snapshot.storedLogicalFrames} FRAMES")
                 appendLine("CAN observations: ${snapshot.storedCanObservations}")
-                appendLine("Database: append-only SQLCipher / WAL • schema v5")
+                appendLine("Database: append-only SQLCipher / WAL • schema v9")
                 appendLine("Encryption: ${security.cipherVersion} • KEYSTORE ENVELOPE v${security.keyEnvelopeVersion}")
                 appendLine("Key: ${security.keyProtection}")
                 appendLine("Migration: ${security.migrationState.displayName.uppercase(Locale.US)}")

@@ -23,6 +23,7 @@ data class HistoricalReplayProgress(
     val sourceCaptureOffsetMicroseconds: ULong,
     val decoderRecoveries: Long,
     val decoderDiscardedBytes: Long,
+    val provenance: DiscoveryEvidenceProvenance,
 )
 
 data class HistoricalReplayReport(
@@ -42,6 +43,7 @@ data class HistoricalReplayReport(
     val decoderDiscardedBytes: Long,
     val exactRecordOrderAndPayloadMatch: Boolean,
     val cancelled: Boolean,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 ) {
     val passed: Boolean get() = !cancelled && exactRecordOrderAndPayloadMatch
 }
@@ -89,9 +91,10 @@ object HistoricalCanReplay {
                 it.observation.sessionId to it.observation.sourceSequence
             }.size == ordered.size
         ) { "Historical replay wire identity is ambiguous across sources." }
+        validateSessionClockOrder(ordered)
 
-        val sourceByWireIdentity = ordered.associate {
-            (it.observation.sessionId to it.observation.sourceSequence) to it.sourceId
+        val sourceByWireIdentity = ordered.associateBy {
+            it.observation.sessionId to it.observation.sourceSequence
         }
         val captureOffsets = captureOffsets(ordered)
         val sourceDuration = captureOffsets.last()
@@ -119,6 +122,7 @@ object HistoricalCanReplay {
                     sourceCaptureOffsetMicroseconds = captureOffset,
                     decoderRecoveries = decoder.recoveryCount,
                     decoderDiscardedBytes = decoder.discardedByteCount,
+                    provenance = item.provenance,
                 )
             )
         }
@@ -152,10 +156,15 @@ object HistoricalCanReplay {
                             fragmentSizes,
                             decoder,
                             sourceByWireIdentity,
-                            consume(
-                                captureOffsets[recordIndex] +
-                                    repetition.toULong() * (sourceDuration + 1UL)
-                            ),
+                            consume(checkedAdd(
+                                captureOffsets[recordIndex],
+                                checkedMultiply(
+                                    repetition.toULong(),
+                                    checkedAdd(sourceDuration, 1UL, "Replay repetition stride overflowed."),
+                                    "Replay repetition offset overflowed.",
+                                ),
+                                "Replay capture offset overflowed.",
+                            )),
                         )
                         fault == ReplayFaultProfile.DROP_FRAGMENT -> {
                             val start = minOf(GatewayFrame.HEADER_LENGTH + 5, wire.size - 2)
@@ -214,6 +223,7 @@ object HistoricalCanReplay {
             decoderDiscardedBytes = decoder.discardedByteCount,
             exactRecordOrderAndPayloadMatch = exact,
             cancelled = cancelled,
+            provenance = DiscoveryEvidenceProvenanceBreakdown.from(ordered),
         )
     }
 
@@ -221,7 +231,7 @@ object HistoricalCanReplay {
         wire: ByteArray,
         fragmentSizes: IntArray,
         decoder: FrameStreamDecoder,
-        sourceByWireIdentity: Map<Pair<UInt, ULong>, String>,
+        sourceByWireIdentity: Map<Pair<UInt, ULong>, DiscoveryObservation>,
         consume: (DiscoveryObservation) -> Unit,
     ) {
         var offset = 0
@@ -230,10 +240,10 @@ object HistoricalCanReplay {
             val count = minOf(fragmentSizes[fragment % fragmentSizes.size], wire.size - offset)
             decoder.append(wire.copyOfRange(offset, offset + count)).forEach { frame ->
                 frame.decodeCanObservations().forEach { observation ->
-                    val sourceId = checkNotNull(
+                    val source = checkNotNull(
                         sourceByWireIdentity[observation.sessionId to observation.sourceSequence]
                     ) { "Decoded replay record has no immutable source identity." }
-                    val item = DiscoveryObservation(sourceId, observation)
+                    val item = source.copy(observation = observation)
                     consume(item)
                 }
             }
@@ -260,10 +270,64 @@ object HistoricalCanReplay {
                             Triple(item.sourceId, item.observation.sessionId, item.observation.sourceSequence)
                         ]
                     )
-                    result[index] = accumulated + item.observation.monotonicMicroseconds - first
+                    result[index] = checkedAdd(
+                        accumulated,
+                        checkedSubtract(
+                            item.observation.monotonicMicroseconds,
+                            first,
+                            "Replay source monotonic clock regressed.",
+                        ),
+                        "Replay capture offset overflowed.",
+                    )
                 }
-                accumulated += last - first + 1_000_000UL
+                accumulated = checkedAdd(
+                    accumulated,
+                    checkedAdd(
+                        checkedSubtract(last, first, "Replay source monotonic clock regressed."),
+                        1_000_000UL,
+                        "Replay inter-session stride overflowed.",
+                    ),
+                    "Replay accumulated capture offset overflowed.",
+                )
             }
         return result
+    }
+
+    private fun validateSessionClockOrder(records: List<DiscoveryObservation>) {
+        records.groupBy { it.sourceId to it.observation.sessionId }.values.forEach { session ->
+            session.sortedWith(
+                compareBy<DiscoveryObservation> { it.observation.monotonicMicroseconds }
+                    .thenBy { it.observation.sourceSequence }
+            ).zipWithNext().forEach { (prior, current) ->
+                require(current.observation.sourceSequence > prior.observation.sourceSequence) {
+                    "Replay source sequence regressed or wrapped within a capture session."
+                }
+            }
+            session.sortedWith(
+                compareBy<DiscoveryObservation> { it.observation.sourceSequence }
+                    .thenBy { it.observation.monotonicMicroseconds }
+            ).zipWithNext().forEach { (prior, current) ->
+                require(
+                    current.observation.monotonicMicroseconds >=
+                        prior.observation.monotonicMicroseconds
+                ) { "Replay source monotonic clock regressed or wrapped within a capture session." }
+            }
+        }
+    }
+
+    private fun checkedAdd(left: ULong, right: ULong, message: String): ULong {
+        require(right <= ULong.MAX_VALUE - left) { message }
+        return left + right
+    }
+
+    private fun checkedSubtract(left: ULong, right: ULong, message: String): ULong {
+        require(left >= right) { message }
+        return left - right
+    }
+
+    private fun checkedMultiply(left: ULong, right: ULong, message: String): ULong {
+        if (left == 0UL || right == 0UL) return 0UL
+        require(left <= ULong.MAX_VALUE / right) { message }
+        return left * right
     }
 }

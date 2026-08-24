@@ -15,6 +15,10 @@ class LinkReliabilityLabTest {
         assertEquals(LINK_RELIABILITY_LABEL, report.label)
         assertEquals(HISTORICAL_REPLAY_SOURCE, report.sourceClassification)
         assertEquals(LINK_RELIABILITY_CONTRACT_VERSION, report.contractVersion)
+        assertEquals(256, report.provenance.localAuthorizedRecords)
+        assertEquals(0, report.provenance.importedV1Records)
+        assertEquals(0, report.provenance.recoveredV2Records)
+        assertEquals(0, report.provenance.ambiguousLegacyRecords)
         assertEquals(15, report.scenarios.size)
         assertEquals(5, report.healthyScenarios)
         assertEquals(10, report.degradedScenarios)
@@ -47,6 +51,24 @@ class LinkReliabilityLabTest {
         assertTrue(overrun.outerSequenceGaps > 0UL)
         assertEquals(0L, overrun.decoderRecoveries)
         assertEquals(LinkQuality.DEGRADED, overrun.observedQuality)
+    }
+
+    @Test
+    fun reliabilityMatrixPreservesHistoricalAuthorityClassesAcrossWireReconstruction() {
+        val source = RealCanFixture.load(javaClass).take(4)
+        val input = listOf(
+            source[0],
+            source[1].copy(provenance = DiscoveryEvidenceProvenance.IMPORTED_V1_HISTORY),
+            source[2].copy(provenance = DiscoveryEvidenceProvenance.RECOVERED_V2_HISTORY),
+            source[3].copy(provenance = DiscoveryEvidenceProvenance.AMBIGUOUS_LEGACY_HISTORY),
+        )
+
+        val report = LinkReliabilityLab.run(input = input, soakCycles = 1)
+
+        assertEquals(1, report.provenance.localAuthorizedRecords)
+        assertEquals(1, report.provenance.importedV1Records)
+        assertEquals(1, report.provenance.recoveredV2Records)
+        assertEquals(1, report.provenance.ambiguousLegacyRecords)
     }
 
     @Test(expected = IllegalStateException::class)

@@ -235,7 +235,9 @@ class DiscoveryActivity : Activity() {
                 } else {
                     emptyList()
                 }
-                val observations = persisted.map { DiscoveryObservation(it.sourceId, it.observation) }
+                val observations = persisted.map {
+                    DiscoveryObservation(it.sourceId, it.observation, it.provenance.classification)
+                }
                 val report = observations.takeIf(List<DiscoveryObservation>::isNotEmpty)
                     ?.let(CanDiscoveryAnalyzer::analyze)
                 val candidateResult = if (report == null) {
@@ -383,6 +385,12 @@ class DiscoveryActivity : Activity() {
             appendLine("Retained observations  ${formatCount(summary.canObservations)}")
             appendLine("Retained sessions  ${summary.canCaptureSessions}")
             appendLine("Unique CAN identifiers  ${if (summary.canObservations > 0) summary.uniqueCanIdentifiers else "UNKNOWN"}")
+            appendLine(
+                "Authority  local ${summary.localAuthorizedCanObservations} • imported-v1 " +
+                    "${summary.importedV1CanObservations} • recovered-v2 " +
+                    "${summary.recoveredV2CanObservations} • ambiguous " +
+                    summary.ambiguousLegacyCanObservations
+            )
             appendLine("Observed-rate estimate  ${report?.acquisition?.estimatedObservedRateFps?.let(::decimal)?.plus(" frames/s") ?: "UNKNOWN"}")
             appendLine("Standard OBD values now  ${currentStandardObdReadings(runtime).size}")
             appendLine("Research candidates present  ${workspace.candidates.count { it.retainedRecords > 0 }}")
@@ -653,7 +661,7 @@ class DiscoveryActivity : Activity() {
         addTitle("Replay Lab")
         addCard(when (val replay = replayState) {
             ReplayState.Idle -> "$HISTORICAL_REPLAY_LABEL\nReady to send encrypted-store observations through the production VHOS envelope, stream, CRC, and CAN decoders."
-            is ReplayState.Running -> "$HISTORICAL_REPLAY_LABEL\nDECODING ${replay.progress.recordIndex}/${replay.progress.totalExpectedRecords}\nSession ${replay.progress.record.sessionId} • sequence ${replay.progress.record.sourceSequence} • ${identifierHex(replay.progress.record.identifier)}"
+            is ReplayState.Running -> "$HISTORICAL_REPLAY_LABEL\nDECODING ${replay.progress.recordIndex}/${replay.progress.totalExpectedRecords}\nSession ${replay.progress.record.sessionId} • sequence ${replay.progress.record.sourceSequence} • ${identifierHex(replay.progress.record.identifier)}\nProvenance ${replay.progress.provenance}"
             is ReplayState.Complete -> replayReportText(replay.report)
             is ReplayState.Failed -> "$HISTORICAL_REPLAY_LABEL\nBLOCKED\n${replay.error}"
         }, when (replayState) {
@@ -846,6 +854,7 @@ class DiscoveryActivity : Activity() {
                         unit = definition.suggestedUnit,
                         observedAt = Instant.now().toString(),
                         elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos(),
+                        observedBootId = bootId,
                         evidenceAnchor = anchor,
                         observer = "owner",
                         note = note,
@@ -1055,9 +1064,12 @@ class DiscoveryActivity : Activity() {
                     canBitratesBps = buildSet {
                         if (healthIsCurrent) obd.bitrateBps?.takeIf { it > 0 }?.let(::add)
                     }.sorted(),
-                    retainedCanObservations = summary.canObservations,
-                    uniqueCanIdentifiers = summary.uniqueCanIdentifiers
-                        .takeIf { summary.canObservations > 0 },
+                    // A current capability snapshot may cite only locally acquired authority.
+                    // Imported/recovered history remains visible in Engineering analysis but cannot
+                    // be rebound to this fresh PARKED authorization.
+                    retainedCanObservations = summary.localAuthorizedCanObservations,
+                    uniqueCanIdentifiers = summary.localAuthorizedUniqueCanIdentifiers
+                        .takeIf { summary.localAuthorizedCanObservations > 0 },
                     obdEcuCount = if (healthIsCurrent) obd.j1979EcuCount else 0,
                     obdEnumerationComplete = if (healthIsCurrent) obd.j1979EnumerationComplete else null,
                     supportedObdPidCount = if (healthIsCurrent) obd.j1979SupportedPidCount else 0,
@@ -1090,7 +1102,9 @@ class DiscoveryActivity : Activity() {
                 }
                 val inputLimit = if (repeat > 1) REPLAY_LOAD_RECORD_LIMIT else DISCOVERY_RECORD_LIMIT
                 val input = store.recentCanObservations(scope, inputLimit)
-                    .map { DiscoveryObservation(it.sourceId, it.observation) }
+                    .map {
+                        DiscoveryObservation(it.sourceId, it.observation, it.provenance.classification)
+                    }
                 val report = HistoricalCanReplay.run(
                     input = input,
                     repeat = repeat,
@@ -1238,7 +1252,14 @@ class DiscoveryActivity : Activity() {
         appendLine("${report.decodedRecords}/${report.expectedRecordsAfterFaults} exact decoded records")
         appendLine("${report.sessions} sessions • ${report.uniqueIdentifiers} identifiers • repeat ${report.repeat}×")
         appendLine("Recoveries ${report.decoderRecoveries} • corrupt ${report.decoderCorruptCandidates} • discarded ${report.decoderDiscardedBytes} bytes")
-        append("Order + payload identity ${if (report.exactRecordOrderAndPayloadMatch) "VERIFIED" else "FAILED"}")
+        appendLine("Order + payload identity ${if (report.exactRecordOrderAndPayloadMatch) "VERIFIED" else "FAILED"}")
+        report.provenance.let { provenance ->
+            append(
+                "Authority local ${provenance.localAuthorizedRecords} • imported-v1 " +
+                    "${provenance.importedV1Records} • recovered-v2 ${provenance.recoveredV2Records} • " +
+                    "ambiguous ${provenance.ambiguousLegacyRecords}"
+            )
+        }
     }
 
     private fun obdStatus(snapshot: HeadUnitSnapshot): String = if (
@@ -1392,6 +1413,17 @@ class DiscoveryActivity : Activity() {
         private const val LIVE_FRESHNESS_MS = 5_000L
         private const val RUNTIME_RENDER_INTERVAL_MILLIS = 250L
         private const val REPLAY_UI_PROGRESS_INTERVAL = 2_048
-        private val EMPTY_DISCOVERY_SUMMARY = DiscoveryEvidenceSummary(0, 0, 0, null, null)
+        private val EMPTY_DISCOVERY_SUMMARY = DiscoveryEvidenceSummary(
+            canObservations = 0,
+            canCaptureSessions = 0,
+            uniqueCanIdentifiers = 0,
+            firstIngestedAt = null,
+            lastIngestedAt = null,
+            localAuthorizedCanObservations = 0,
+            localAuthorizedUniqueCanIdentifiers = 0,
+            importedV1CanObservations = 0,
+            recoveredV2CanObservations = 0,
+            ambiguousLegacyCanObservations = 0,
+        )
     }
 }

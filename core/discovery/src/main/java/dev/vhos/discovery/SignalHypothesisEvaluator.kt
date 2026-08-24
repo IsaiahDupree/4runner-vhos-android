@@ -19,6 +19,7 @@ data class CandidateTransformEvaluation(
     val unit: String,
     val sourceIds: List<String>,
     val summary: CandidateValueSummary,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 )
 
 data class SignalHypothesisEvaluation(
@@ -36,6 +37,7 @@ data class SignalHypothesisEvaluation(
     val requiredValidation: List<String>,
     val limitations: String,
     val productionValueDisplayAllowed: Boolean,
+    val provenance: DiscoveryEvidenceProvenanceBreakdown,
 )
 
 data class SignalHypothesisEvaluationReport(
@@ -70,7 +72,7 @@ object SignalHypothesisCatalog {
     const val BUNDLED_RESOURCE =
         "vhos/vehicle-signal-packs/toyota-4runner-2005-passive-can-hypotheses.v1.json"
     const val BUNDLED_SHA256 =
-        "6e2df8207e8977d613923a01f4bea7a16baba74a1869cce2ad0a83b56cf6ba32"
+        "2eb734187bf79f04973621a3534ae6cc185d0f1cbb5a91fa71183c82055f69e8"
 
     private val gson = GsonBuilder()
         .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
@@ -256,6 +258,7 @@ object SignalHypothesisEvaluator {
                             unit = transform.unit,
                             sourceIds = transform.sourceIds,
                             summary = summary(rawValues.map { it * transform.scale + transform.offset }),
+                            provenance = DiscoveryEvidenceProvenanceBreakdown.from(matching),
                         )
                     }
                 },
@@ -263,6 +266,7 @@ object SignalHypothesisEvaluator {
                 requiredValidation = hypothesis.requiredValidation,
                 limitations = hypothesis.limitations,
                 productionValueDisplayAllowed = false,
+                provenance = DiscoveryEvidenceProvenanceBreakdown.from(matching),
             )
         }
         return SignalHypothesisEvaluationReport(

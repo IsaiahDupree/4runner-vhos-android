@@ -87,7 +87,7 @@ The first vertical slice provides:
   timing-belt applicability guard;
 - a 22-system whole-vehicle health map that begins entirely `UNKNOWN / UNKNOWN` and requires
   immutable evidence before showing any health state;
-- non-destructive SQLCipher schema migrations through v6, including immutable
+- non-destructive SQLCipher schema migrations through v7, including immutable
   vehicle/profile/source bindings on raw logical/CAN evidence, scoped Android-internal Discovery
   captures/markers/capability observations, fail-closed legacy quarantine, and owner-controlled
   versioned digital-twin JSON export;

@@ -29,9 +29,9 @@ core/discovery/src/main/resources/vhos/vehicle-signal-packs/
 | Field | Value |
 | --- | --- |
 | Pack ID | `toyota.4runner.2005.passive-can-hypotheses` |
-| Pack version | `0.4.0` |
+| Pack version | `0.4.1` |
 | Contract | `can.signal-hypothesis-pack@1.0.0` |
-| SHA-256 | `6e2df8207e8977d613923a01f4bea7a16baba74a1869cce2ad0a83b56cf6ba32` |
+| SHA-256 | `2eb734187bf79f04973621a3534ae6cc185d0f1cbb5a91fa71183c82055f69e8` |
 | Product source commit | `60282e6` |
 | Authority | `DISCOVERY_ONLY` |
 | Accepted signal definitions | `0` |

@@ -903,7 +903,9 @@ private class GatewayGattConnection(
                     if (!observation.listenOnly) {
                         return fail("CAN evidence does not retain listen-only proof.")
                     }
-                    val inserted = evidenceScope?.let { database.persistCanObservation(it, observation) } ?: false
+                    val inserted = evidenceScope?.let {
+                        database.persistCanObservation(it, observation, parentFrame = frame)
+                    } ?: false
                     if (inserted && frame.messageType == MessageType.RAW_CAN_FRAME) vehicleFrames++
                     bitrateBps = observation.bitrateBps.toLong()
                 }

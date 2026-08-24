@@ -49,6 +49,7 @@ internal object RealCanFixture {
             require(evidenceSource == "gateway-flash" && ingestedAt.isNotBlank())
             return DiscoveryObservation(
                 sourceId = gatewayId,
+                provenance = DiscoveryEvidenceProvenance.LOCAL_AUTHORIZED,
                 observation = CanObservation(
                     sessionId = sessionId.toUInt(),
                     sourceSequence = sourceSequence.toULong(),

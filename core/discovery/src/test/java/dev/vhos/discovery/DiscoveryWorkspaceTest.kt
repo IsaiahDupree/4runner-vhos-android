@@ -106,6 +106,7 @@ class DiscoveryWorkspaceTest {
             unit = "psi",
             observedAt = "2026-08-21T12:00:02Z",
             elapsedRealtimeNanos = 120,
+            observedBootId = "boot-1",
             evidenceAnchor = anchor(22UL),
             observer = "owner",
             note = null,
@@ -393,23 +394,46 @@ class DiscoveryWorkspaceTest {
             unit = null,
             observedAt = "2026-08-22T12:00:01Z",
             elapsedRealtimeNanos = 101,
+            observedBootId = "boot-1",
             evidenceAnchor = raw,
             observer = "owner",
             note = null,
             safetyAuthorization = bootstrap,
         ).validate()
+        val finalRaw = raw.copy(
+            sourceSequence = 106UL,
+            gatewayMonotonicMicroseconds = 106_000UL,
+        )
         active.copy(
             state = AndroidCaptureDraftState.COMPLETED,
             endedAt = "2026-08-22T12:00:05Z",
             endedElapsedRealtimeNanos = 105,
             endedBootId = "boot-1",
-            endAnchor = raw,
+            endAnchor = finalRaw,
             endLogicalFrameCount = 15,
             endCanObservationCount = 25,
             finalizationAuthority =
                 AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION,
-            finalizationSafetyAuthorization = bootstrap.copy(healthFrameSequence = 91UL),
+            finalizationSafetyAuthorization = bootstrap.copy(
+                healthFrameSequence = 91UL,
+                rawCanAnchor = finalRaw,
+            ),
         ).validate()
+
+        assertThrows(IllegalArgumentException::class.java) {
+            active.copy(
+                state = AndroidCaptureDraftState.COMPLETED,
+                endedAt = "2026-08-22T12:00:05Z",
+                endedElapsedRealtimeNanos = 105,
+                endedBootId = "boot-1",
+                endAnchor = raw,
+                endLogicalFrameCount = 15,
+                endCanObservationCount = 25,
+                finalizationAuthority =
+                    AndroidCaptureFinalizationAuthority.PASSIVE_BOOTSTRAP_VERIFIED_COMPLETION,
+                finalizationSafetyAuthorization = bootstrap.copy(healthFrameSequence = 91UL),
+            ).validate()
+        }
 
         assertThrows(IllegalArgumentException::class.java) {
             active.copy(
@@ -427,6 +451,7 @@ class DiscoveryWorkspaceTest {
                 unit = null,
                 observedAt = "2026-08-22T12:00:01Z",
                 elapsedRealtimeNanos = 101,
+                observedBootId = "boot-1",
                 evidenceAnchor = raw.copy(sourceSequence = 101UL),
                 observer = "owner",
                 note = null,
@@ -446,6 +471,12 @@ class DiscoveryWorkspaceTest {
             captureSessions = 2,
             researchPriority = 96,
             confidence = null,
+            provenance = DiscoveryEvidenceProvenanceBreakdown(
+                localAuthorizedRecords = 12,
+                importedV1Records = 0,
+                recoveredV2Records = 0,
+                ambiguousLegacyRecords = 0,
+            ),
             authority = AndroidCandidateResearchItem.AUTHORITY,
             nextValidation = "Collect a synchronized independent reference.",
             promotionChecklist = AndroidSignalPromotionGate(
