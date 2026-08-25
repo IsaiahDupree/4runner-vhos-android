@@ -2,20 +2,20 @@
 
 ## Install on the head unit
 
-### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.14/app-debug.apk)
+### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.15/app-debug.apk)
 
-Current public development build: **0.1.0-dev.14** (`app-debug.apk`, 10,800,109 bytes; SHA-256
-`87d86262f23a22bf649972b35cfbdfe1a341f0bd83c9bd15b5ae3b067ce53627`). The link above
+Current public development build: **0.1.0-dev.15** (`app-debug.apk`, 10,800,109 bytes; SHA-256
+`92f205af71e48a98f95de625120ef86391602946a549df923440fbfaa71d9225`). The link above
 downloads the installer directly and does not require a GitHub account.
 
-This release hardens the landscape Discovery Engineering workspace, real-capture replay, and
-cross-device evidence ingestion. Logical vehicle identity, live `RAW_CAN_FRAME` lineage, advancing
-selector anchors, finalization anchors, portable evidence manifests, and candidate provenance now
-fail closed instead of accepting stale, mixed-source, or capture-log-only authority. It retains the
-vehicle/source-scoped overview, supported standard values, 16 versioned test procedures, durable
-capture drafts and event markers, candidate review, closed promotion registry, evidence progress,
-and production-path replay. An evidence-only selector bootstrap can operate while motion honestly
-remains `UNKNOWN`; it cannot grant `PARKED` authority or unlock any unrelated control.
+This release adds vendor-compatible BLE recovery for Android head units that report scanner error
+3, 4, or 5 or return an empty service-filtered scan. Android first tries a saved validated gateway
+and the exact VHOS service filter, then performs one bounded software-qualified scan. Only the
+exact VHOS service UUID or approved VHOS device names are admitted, and encrypted GATT, CRC,
+gateway identity, protocol, role, and capability validation remain mandatory. The app also explains
+that the iPhone must release the deployed one-client ESP32 before Android can acquire it. All
+Discovery, replay, evidence-lineage, candidate, and fail-closed promotion behavior from dev.14 is
+retained.
 
 While the vehicle is parked:
 
@@ -25,7 +25,7 @@ While the vehicle is parked:
 4. Tap **Install**, then **Open**.
 
 [Open the public Release Hub](https://isaiahdupree.github.io/4runner-vhos-release-hub/) ·
-[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.14)
+[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.15)
 
 ## Installed in the 4Runner
 

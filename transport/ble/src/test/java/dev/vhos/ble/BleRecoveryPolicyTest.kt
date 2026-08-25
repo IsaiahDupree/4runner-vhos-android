@@ -1,5 +1,6 @@
 package dev.vhos.ble
 
+import dev.vhos.model.DeviceRole
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -53,5 +54,80 @@ class BleRecoveryPolicyTest {
         val exhausted = BleRecoveryPolicy.afterConnectionLoss(5)
         assertFalse(exhausted.automatic)
         assertEquals(0L, exhausted.delayMillis)
+    }
+
+    @Test
+    fun vendorScanFailuresSelectSoftwareQualificationOnlyOnce() {
+        listOf(3, 4, 5).forEach { errorCode ->
+            assertEquals(
+                BleScanStrategy.SOFTWARE_QUALIFIED,
+                BleRecoveryPolicy.nextScanStrategyAfterFailure(
+                    BleScanStrategy.SERVICE_FILTERED,
+                    errorCode,
+                ),
+            )
+        }
+        assertEquals(
+            BleScanStrategy.SERVICE_FILTERED,
+            BleRecoveryPolicy.nextScanStrategyAfterFailure(BleScanStrategy.SERVICE_FILTERED, 6),
+        )
+        assertEquals(
+            BleScanStrategy.SOFTWARE_QUALIFIED,
+            BleRecoveryPolicy.nextScanStrategyAfterFailure(BleScanStrategy.SOFTWARE_QUALIFIED, 3),
+        )
+    }
+
+    @Test
+    fun emptyFilteredWindowSelectsSoftwareQualification() {
+        assertEquals(
+            BleScanStrategy.SOFTWARE_QUALIFIED,
+            BleRecoveryPolicy.nextScanStrategyAfterNoResult(BleScanStrategy.SERVICE_FILTERED),
+        )
+        assertEquals(
+            BleScanStrategy.SOFTWARE_QUALIFIED,
+            BleRecoveryPolicy.nextScanStrategyAfterNoResult(BleScanStrategy.SOFTWARE_QUALIFIED),
+        )
+    }
+
+    @Test
+    fun compatibilityScanAdmitsOnlyVhosEvidenceHints() {
+        assertTrue(
+            BleRecoveryPolicy.admitsAdvertisement(
+                BleScanStrategy.SOFTWARE_QUALIFIED,
+                advertisedName = null,
+                advertisesVhosService = true,
+            )
+        )
+        listOf(
+            "VHOS-4R-OBD-B08D14",
+            "vhos-mrdiy-b08d14",
+            "VHOS-4R-AC-123456",
+            "VHOS-AC-123456",
+        ).forEach { name ->
+            assertTrue(
+                BleRecoveryPolicy.admitsAdvertisement(
+                    BleScanStrategy.SOFTWARE_QUALIFIED,
+                    advertisedName = name,
+                    advertisesVhosService = false,
+                )
+            )
+        }
+        listOf(null, "Battery Monitor", "CarBT", "VHOS-NOT-APPROVED").forEach { name ->
+            assertFalse(
+                BleRecoveryPolicy.admitsAdvertisement(
+                    BleScanStrategy.SOFTWARE_QUALIFIED,
+                    advertisedName = name,
+                    advertisesVhosService = false,
+                )
+            )
+        }
+    }
+
+    @Test
+    fun approvedNamesMapToStableWireRoles() {
+        assertEquals(DeviceRole.OBD_CAN, BleRecoveryPolicy.approvedRole("VHOS-4R-OBD-B08D14"))
+        assertEquals(DeviceRole.OBD_CAN, BleRecoveryPolicy.approvedRole("vhos-mrdiy-b08d14"))
+        assertEquals(DeviceRole.AC_SENSOR, BleRecoveryPolicy.approvedRole(" VHOS-4R-AC-123456 "))
+        assertEquals(null, BleRecoveryPolicy.approvedRole("Battery Monitor"))
     }
 }

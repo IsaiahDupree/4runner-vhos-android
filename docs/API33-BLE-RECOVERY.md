@@ -28,8 +28,12 @@ as a validated VHOS or OBD connection.
    CRC32C, handshake identity, role, protocol-major, and required-capability validation.
 4. If no saved candidate is available or a direct connection times out, Android runs one balanced,
    service-filtered 12-second scan window.
-5. A scan with no result backs off for 5, 15, 30, and 60 seconds.
-6. Android stack failures such as code 3 use colder delays of 15, 30, 60, and 120 seconds.
+5. If the vendor OS rejects that filter with code 3/4/5, or the filtered window is empty, the next
+   bounded attempt removes the Android platform filter and qualifies results in-app. It admits only
+   advertisements carrying the exact VHOS service UUID or an approved canonical/legacy VHOS name;
+   every admitted candidate still has to pass the full GATT, encryption, CRC and identity contract.
+6. A scan with no result backs off for 5, 15, 30, and 60 seconds. Stack failures that remain after
+   compatibility fallback use colder delays of 15, 30, 60, and 120 seconds.
 7. After four bounded failures, automatic recovery pauses. The owner must tap **Connect / Reacquire**
    or use **Bluetooth settings** to cycle the head-unit radio.
 
@@ -62,6 +66,8 @@ Run these while parked and preserve screenshots plus exported evidence:
 
 1. **Cold Android ownership:** iPhone disconnected; Bluetooth on; Connect / Reacquire reaches a
    validated VHOS stream without code 3.
+   The iPhone must release/disconnect first because the deployed ESP32 gateway intentionally has a
+   one-client BLE ownership contract; an iPhone-owned gateway may stop advertising altogether.
 2. **Saved reconnect:** Stop, then Connect / Reacquire. The UI must report direct saved-gateway
    connection without scanning.
 3. **iPhone handoff:** Release for iPhone, connect the iPhone, verify streaming, disconnect the

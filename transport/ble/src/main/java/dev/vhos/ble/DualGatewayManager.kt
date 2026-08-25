@@ -68,6 +68,7 @@ class DualGatewayManager(
     private var recoveryFailures = 0
     private var knownGatewaysAttempted = false
     private var radioReceiverRegistered = false
+    private var scanStrategy = BleScanStrategy.SERVICE_FILTERED
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = accept(result)
@@ -90,6 +91,7 @@ class DualGatewayManager(
                 BluetoothAdapter.STATE_ON -> {
                     recoveryFailures = 0
                     knownGatewaysAttempted = false
+                    scanStrategy = BleScanStrategy.SERVICE_FILTERED
                     scheduleAcquisition(1_000L, "Bluetooth radio restored")
                 }
             }
@@ -114,6 +116,7 @@ class DualGatewayManager(
         released = false
         recoveryFailures = 0
         knownGatewaysAttempted = false
+        scanStrategy = BleScanStrategy.SERVICE_FILTERED
         registerRadioReceiver()
         if (!hasRuntimePermissions()) {
             emitObd(
@@ -234,19 +237,28 @@ class DualGatewayManager(
             emitObd(ConnectionPhase.UNAVAILABLE, IndicatorLevel.BLOCKED, "BLE central scanning is unavailable.")
             return
         }
-        val filter = ScanFilter.Builder().setServiceUuid(VhosBleUuids.SERVICE_PARCEL).build()
+        val filters = when (scanStrategy) {
+            BleScanStrategy.SERVICE_FILTERED ->
+                listOf(ScanFilter.Builder().setServiceUuid(VhosBleUuids.SERVICE_PARCEL).build())
+            BleScanStrategy.SOFTWARE_QUALIFIED -> emptyList()
+        }
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
             .build()
         scanning = true
         try {
-            scanner.startScan(listOf(filter), settings, scanCallback)
+            scanner.startScan(filters, settings, scanCallback)
             if (scanning) {
+                val scanDescription = when (scanStrategy) {
+                    BleScanStrategy.SERVICE_FILTERED -> "Android service-filtered"
+                    BleScanStrategy.SOFTWARE_QUALIFIED -> "vendor-compatible software-qualified"
+                }
                 emitObd(
                     ConnectionPhase.SCANNING,
                     IndicatorLevel.ACTIVE,
-                    "Scanning for the VHOS service for ${BleRecoveryPolicy.SCAN_WINDOW_MILLIS / 1_000} seconds.",
+                    "$scanDescription scan for ${BleRecoveryPolicy.SCAN_WINDOW_MILLIS / 1_000} seconds. " +
+                        "The iPhone must release the one-client gateway before Android can acquire it.",
                     recoveryAttempt = recoveryFailures,
                 )
                 handler.postAtTime(
@@ -284,20 +296,30 @@ class DualGatewayManager(
     private fun accept(result: ScanResult) {
         if (!running || released || !scanning || candidates.containsKey(result.device.address)) return
         if (candidates.size >= MAX_CONCURRENT_CANDIDATES) return
+        val advertisedName = result.scanRecord?.deviceName ?: safeDeviceName(result.device)
+        val advertisesVhosService = result.scanRecord?.serviceUuids.orEmpty()
+            .contains(VhosBleUuids.SERVICE_PARCEL)
+        if (!BleRecoveryPolicy.admitsAdvertisement(
+                strategy = scanStrategy,
+                advertisedName = advertisedName,
+                advertisesVhosService = advertisesVhosService,
+            )
+        ) return
+        val roleHint = roleForApprovedName(advertisedName) ?: DeviceRole.OBD_CAN
         stopScan()
         emitObd(
             ConnectionPhase.DISCOVERED,
             IndicatorLevel.ACTIVE,
-            "Candidate ${DeviceDisplayIdentity.obdName(result.device.name)} found at ${result.rssi} dBm; validating GATT.",
-            name = DeviceDisplayIdentity.obdName(result.device.name),
+            "Candidate ${displayName(advertisedName, roleHint, null)} found at ${result.rssi} dBm; validating GATT.",
+            name = displayName(advertisedName, roleHint, null),
             address = result.device.address,
             rssi = result.rssi,
         )
         connectCandidate(
             device = result.device,
-            initialName = safeDeviceName(result.device),
+            initialName = advertisedName,
             initialRssi = result.rssi,
-            roleHint = roleForApprovedName(safeDeviceName(result.device)) ?: DeviceRole.OBD_CAN,
+            roleHint = roleHint,
             expectedSource = null,
         )
     }
@@ -325,6 +347,7 @@ class DualGatewayManager(
                 override fun validated(address: String, identity: ValidatedIdentity) {
                     recoveryFailures = 0
                     knownGatewaysAttempted = true
+                    scanStrategy = BleScanStrategy.SERVICE_FILTERED
                     stopScan()
                 }
 
@@ -348,23 +371,42 @@ class DualGatewayManager(
 
     private fun onScanWindowExpired() {
         if (!scanning || !running || released) return
+        val previousStrategy = scanStrategy
         stopScan()
         recoveryFailures++
+        scanStrategy = BleRecoveryPolicy.nextScanStrategyAfterNoResult(previousStrategy)
+        val fallbackDetail = if (scanStrategy != previousStrategy) {
+            "; next attempt removes the vendor OS service filter and qualifies VHOS advertisements in-app"
+        } else {
+            "; verify the iPhone released the one-client gateway"
+        }
         scheduleRecovery(
             BleRecoveryPolicy.afterNoResult(recoveryFailures),
-            "No approved VHOS advertisement appeared during the bounded scan",
+            "No approved VHOS advertisement appeared during the bounded scan$fallbackDetail",
         )
     }
 
     private fun handleScanFailure(errorCode: Int, exceptionName: String? = null) {
         if (!running || released || !scanning) return
+        val previousStrategy = scanStrategy
         stopScan()
         recoveryFailures++
+        scanStrategy = BleRecoveryPolicy.nextScanStrategyAfterFailure(previousStrategy, errorCode)
         val errorName = BleRecoveryPolicy.scanErrorName(errorCode)
         val exceptionSuffix = exceptionName?.let { " ($it)" }.orEmpty()
+        val fallbackSelected = scanStrategy != previousStrategy
         scheduleRecovery(
-            decision = BleRecoveryPolicy.afterScanFailure(errorCode, recoveryFailures),
-            reason = "Android BLE scanner reported $errorName ($errorCode)$exceptionSuffix",
+            decision = if (fallbackSelected) {
+                BleRecoveryPolicy.afterNoResult(recoveryFailures)
+            } else {
+                BleRecoveryPolicy.afterScanFailure(errorCode, recoveryFailures)
+            },
+            reason = "Android BLE scanner reported $errorName ($errorCode)$exceptionSuffix" +
+                if (fallbackSelected) {
+                    "; retrying without the vendor OS service filter while retaining VHOS admission checks"
+                } else {
+                    "; verify the iPhone released the one-client gateway"
+                },
             platformErrorCode = errorCode,
             transportErrorName = errorName,
         )
@@ -459,12 +501,7 @@ class DualGatewayManager(
     }
 
     private fun roleForApprovedName(name: String?): DeviceRole? {
-        val normalized = name?.uppercase() ?: return null
-        return when {
-            normalized.startsWith("VHOS-4R-OBD") || normalized.startsWith("VHOS-MRDIY-") -> DeviceRole.OBD_CAN
-            normalized.startsWith("VHOS-4R-AC") || normalized.startsWith("VHOS-AC-") -> DeviceRole.AC_SENSOR
-            else -> null
-        }
+        return BleRecoveryPolicy.approvedRole(name)
     }
 
     private fun displayName(name: String?, role: DeviceRole, sourceId: String?): String = when (role) {

@@ -1,9 +1,16 @@
 package dev.vhos.ble
 
+import dev.vhos.model.DeviceRole
+
 data class BleRecoveryDecision(
     val automatic: Boolean,
     val delayMillis: Long,
 )
+
+enum class BleScanStrategy {
+    SERVICE_FILTERED,
+    SOFTWARE_QUALIFIED,
+}
 
 object BleRecoveryPolicy {
     const val SCAN_WINDOW_MILLIS = 12_000L
@@ -47,6 +54,48 @@ object BleRecoveryPolicy {
 
     fun afterConnectionLoss(consecutiveFailure: Int): BleRecoveryDecision =
         bounded(normalBackoffMillis, consecutiveFailure)
+
+    /**
+     * Some vendor Bluetooth stacks fail while registering an Android hardware/service filter even
+     * though an ordinary BLE scan remains usable. The compatibility strategy removes only that
+     * platform filter. Candidate admission remains restricted to the VHOS service UUID or an
+     * approved VHOS owner-facing name, and GATT/CRC/handshake validation is still mandatory.
+     */
+    fun nextScanStrategyAfterFailure(
+        current: BleScanStrategy,
+        errorCode: Int,
+    ): BleScanStrategy = when {
+        current == BleScanStrategy.SERVICE_FILTERED && errorCode in setOf(3, 4, 5) ->
+            BleScanStrategy.SOFTWARE_QUALIFIED
+        else -> current
+    }
+
+    fun nextScanStrategyAfterNoResult(current: BleScanStrategy): BleScanStrategy = when (current) {
+        BleScanStrategy.SERVICE_FILTERED -> BleScanStrategy.SOFTWARE_QUALIFIED
+        BleScanStrategy.SOFTWARE_QUALIFIED -> BleScanStrategy.SOFTWARE_QUALIFIED
+    }
+
+    fun approvedRole(advertisedName: String?): DeviceRole? {
+        val normalized = advertisedName?.trim()?.uppercase() ?: return null
+        return when {
+            normalized.startsWith("VHOS-4R-OBD") || normalized.startsWith("VHOS-MRDIY-") ->
+                DeviceRole.OBD_CAN
+            normalized.startsWith("VHOS-4R-AC") || normalized.startsWith("VHOS-AC-") ->
+                DeviceRole.AC_SENSOR
+            else -> null
+        }
+    }
+
+    fun admitsAdvertisement(
+        strategy: BleScanStrategy,
+        advertisedName: String?,
+        advertisesVhosService: Boolean,
+    ): Boolean = when (strategy) {
+        // Android has already applied the exact UUID filter before delivering the callback.
+        BleScanStrategy.SERVICE_FILTERED -> true
+        BleScanStrategy.SOFTWARE_QUALIFIED ->
+            advertisesVhosService || approvedRole(advertisedName) != null
+    }
 
     private fun bounded(backoff: LongArray, consecutiveFailure: Int): BleRecoveryDecision {
         require(consecutiveFailure >= 1)
