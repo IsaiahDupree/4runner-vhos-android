@@ -807,6 +807,11 @@ data class AndroidCandidateResearchItem(
     val authority: String,
     val nextValidation: String,
     val promotionChecklist: AndroidSignalPromotionGate,
+    val rawFieldValues: CandidateValueSummary? = null,
+    val candidateTransforms: List<CandidateTransformEvaluation> = emptyList(),
+    val fieldFormula: String? = null,
+    val sourceIds: List<String> = emptyList(),
+    val limitations: String = "",
 ) {
     fun validate(): AndroidCandidateResearchItem = apply {
         require(candidateId.isNotBlank() && sourceDescription.isNotBlank() && evidenceStatus.isNotBlank())
@@ -819,6 +824,11 @@ data class AndroidCandidateResearchItem(
             "Candidate planning refuses to mix local, imported, recovered, or ambiguous authority."
         }
         require(authority == AUTHORITY && nextValidation.isNotBlank())
+        rawFieldValues?.let { require(it.count in 1..retainedRecords) }
+        require(candidateTransforms.all { transform ->
+            transform.summary.count == rawFieldValues?.count && transform.sourceIds.isNotEmpty()
+        })
+        if (rawFieldValues != null) require(fieldFormula != null)
         require(!promotionChecklist.ready) {
             "Discovery-only AndroidCandidateResearchItem cannot become promotion-ready without a validated registry contract."
         }
@@ -871,6 +881,11 @@ object AndroidCandidateResearchAdapter {
                     independentCorroboration = false,
                     goldenReplay = false,
                 ),
+                rawFieldValues = candidate.fieldValues,
+                candidateTransforms = candidate.transformEvaluations,
+                fieldFormula = candidate.fieldFormula,
+                sourceIds = candidate.sourceIds,
+                limitations = candidate.limitations,
             ).validate()
         }
     }

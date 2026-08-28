@@ -38,6 +38,8 @@ import dev.vhos.discovery.AndroidDiscoveryTestTemplate
 import dev.vhos.discovery.AndroidVehicleCapabilityObservation
 import dev.vhos.discovery.CanDiscoveryAnalyzer
 import dev.vhos.discovery.CanDiscoveryReport
+import dev.vhos.discovery.CanUnitsDashboardProjection
+import dev.vhos.discovery.CanUnitsDashboardProjector
 import dev.vhos.discovery.DiscoveryObservation
 import dev.vhos.discovery.HISTORICAL_REPLAY_LABEL
 import dev.vhos.discovery.HistoricalCanReplay
@@ -241,14 +243,20 @@ class DiscoveryActivity : Activity() {
                 val report = observations.takeIf(List<DiscoveryObservation>::isNotEmpty)
                     ?.let(CanDiscoveryAnalyzer::analyze)
                 val candidateResult = if (report == null) {
-                    CandidateResult(emptyList(), null)
+                    CandidateResult(emptyList(), null, null)
                 } else {
                     runCatching {
                         val pack = SignalHypothesisCatalog.loadBundled()
                         val evaluation = SignalHypothesisEvaluator.evaluate(observations, pack)
                         val plan = SignalResearchPlanner.plan(report, evaluation, pack)
-                        CandidateResult(AndroidCandidateResearchAdapter.from(evaluation, plan), null)
-                    }.getOrElse { CandidateResult(emptyList(), it.message ?: it.javaClass.simpleName) }
+                        CandidateResult(
+                            items = AndroidCandidateResearchAdapter.from(evaluation, plan),
+                            unitsDashboard = CanUnitsDashboardProjector.project(report, evaluation),
+                            error = null,
+                        )
+                    }.getOrElse {
+                        CandidateResult(emptyList(), null, it.message ?: it.javaClass.simpleName)
+                    }
                 }
                 val captures = scope?.let { store.recentDiscoveryCaptures(scope = it) }.orEmpty()
                 val activeCapture = store.activeDiscoveryCapture()
@@ -264,6 +272,7 @@ class DiscoveryActivity : Activity() {
                     summary = summary,
                     report = report,
                     candidates = candidateResult.items,
+                    unitsDashboard = candidateResult.unitsDashboard,
                     candidateError = candidateResult.error,
                     captures = captures,
                     activeCapture = activeCapture,
@@ -325,6 +334,7 @@ class DiscoveryActivity : Activity() {
             workspace.loading -> renderLoading()
             workspace.loadError != null -> renderFailure(workspace.loadError.orEmpty())
             selectedSection == Section.OVERVIEW -> renderOverview(parked)
+            selectedSection == Section.UNITS -> renderUnitsDashboard()
             selectedSection == Section.SIGNALS -> renderSignals()
             selectedSection == Section.TESTS -> renderTests()
             selectedSection == Section.CAPTURES -> renderCaptures()
@@ -410,8 +420,11 @@ class DiscoveryActivity : Activity() {
             ),
         )
         addActions(
+            Action("CAN units + derived", true) { select(Section.UNITS) },
             Action("Explore signals", true) { select(Section.SIGNALS) },
             Action("Review candidates", true) { select(Section.CANDIDATES) },
+        )
+        addActions(
             Action("Replay saved evidence", summary.canObservations > 0) { select(Section.REPLAY) },
         )
         inspector.text = buildString {
@@ -428,6 +441,140 @@ class DiscoveryActivity : Activity() {
             appendLine()
             appendLine("CAPABILITY HISTORY")
             append("${workspace.capabilityObservations.size} Android-internal observations. Portable VehicleCapabilitySnapshot mapping is intentionally not claimed yet.")
+        }
+    }
+
+    private fun renderUnitsDashboard() {
+        addTitle("CAN physical units + derived data")
+        val standardReadings = currentStandardObdReadings(runtime)
+        if (standardReadings.isEmpty()) {
+            addCard(
+                "STANDARDIZED SAE J1979 • NO CURRENT VALUES\n" +
+                    "A value appears here only after the current validated gateway contract proves " +
+                    "the ECU, supported PID, response, definition revision, and freshness.",
+                IndicatorLevel.WAIT,
+            )
+        } else {
+            addCard(buildString {
+                appendLine("STANDARDIZED SAE J1979 • CURRENT VALIDATED RESPONSES")
+                standardReadings.sortedBy { it.signalId }.forEach { reading ->
+                    appendLine("${reading.name}  ${decimal(reading.value, 2)} ${reading.unit}")
+                    appendLine(
+                        "  ${reading.signalId} • ${reading.ecuAddress}/PID " +
+                            String.format(Locale.US, "%02X", reading.pid) +
+                            " • definition ${reading.definitionRevision.take(12)}… • seq ${reading.sourceSequence}"
+                    )
+                }
+            }, IndicatorLevel.PASS)
+        }
+
+        val dashboard = workspace.unitsDashboard
+        if (dashboard == null) {
+            addCard(
+                "PASSIVE-CAN UNIT PROJECTION • UNAVAILABLE\n" +
+                    (workspace.candidateError ?: "Retained listen-only CAN evidence is required."),
+                if (workspace.candidateError == null) IndicatorLevel.WAIT else IndicatorLevel.BLOCKED,
+            )
+            inspector.text = "VALUE AUTHORITY\n${CanUnitsDashboardProjector.STANDARDIZED_VALUES_AUTHORITY}\n\n" +
+                "No passive-CAN unit, scale, meaning, or derived relationship was inferred without verified retained evidence."
+            return
+        }
+
+        addCard(buildString {
+            appendLine(dashboard.requiredBadge)
+            appendLine("PACK ${dashboard.packId}@${dashboard.packVersion}")
+            appendLine("SHA-256 ${dashboard.packSha256}")
+            appendLine()
+            appendLine("Candidate physical-unit series  ${dashboard.candidateUnitSeries.size}")
+            appendLine("Raw-only channels  ${dashboard.rawOnlyChannels.size}")
+            append("Same-session derived relationships  ${dashboard.derivedRelationships.size}")
+        }, IndicatorLevel.CHECK)
+
+        dashboard.candidateUnitSeries.take(CANDIDATE_UNIT_SERIES_LIMIT).forEach { series ->
+            val stats = series.transform.summary
+            addCard(buildString {
+                appendLine("${series.requiredBadge}")
+                appendLine("${series.proposedSemantic ?: series.candidateId} • ${series.identifierHex}")
+                appendLine("Candidate transform  ${series.transform.transformId}")
+                appendLine("Mean  ${decimal(stats.mean, 2)} ${series.transform.unit}")
+                appendLine(
+                    "Min ${decimal(stats.minimum, 2)} • max ${decimal(stats.maximum, 2)} • " +
+                        "peak-to-peak ${decimal(stats.peakToPeak, 2)} ${series.transform.unit}"
+                )
+                appendLine(
+                    "Std dev ${decimal(stats.standardDeviation, 2)} ${series.transform.unit} • " +
+                        "CV ${stats.coefficientOfVariation?.let { decimal(it * 100.0, 2) + "%" } ?: "UNDEFINED"}"
+                )
+                appendLine("Evidence ${stats.count} values • ${series.sessions} session(s) • ${series.evidenceStatus}")
+                appendLine("Raw field  ${series.rawFieldFormula}")
+                appendLine("Formula  ${series.transform.formula} ${series.transform.unit}")
+                if (series.competingTransformCount > 1) {
+                    appendLine("CONFLICT  ${series.competingTransformCount} source-pinned transforms disagree")
+                }
+                append("Authority  ${series.authority}")
+            }, IndicatorLevel.CHECK)
+        }
+        if (dashboard.candidateUnitSeries.size > CANDIDATE_UNIT_SERIES_LIMIT) {
+            addCard(
+                "${dashboard.candidateUnitSeries.size - CANDIDATE_UNIT_SERIES_LIMIT} additional " +
+                    "candidate-unit series remain available in the evaluated pack.",
+                IndicatorLevel.WAIT,
+            )
+        }
+
+        dashboard.derivedRelationships.forEach { relationship ->
+            addCard(buildString {
+                appendLine("UNVERIFIED DERIVED RELATIONSHIP")
+                appendLine("${relationship.leftIdentifierHex} ↔ ${relationship.rightIdentifierHex}")
+                appendLine(
+                    "Same-source/session nearest pairs  ${relationship.pairedSamples} • window <= " +
+                        "${relationship.maximumPairingDeltaMicroseconds} us"
+                )
+                appendLine("Pearson correlation  ${decimal(relationship.pearsonCorrelation, 4)}")
+                appendLine(
+                    "Median raw right/left ratio  " +
+                        (relationship.medianRawRightToLeftRatio?.let { decimal(it, 4) } ?: "UNAVAILABLE")
+                )
+                relationship.medianCandidateUnitRightToLeftRatio?.let { ratio ->
+                    appendLine(
+                        "Median candidate-unit right/left ratio  ${decimal(ratio, 4)} " +
+                            "(${relationship.commonCandidateUnit})"
+                    )
+                }
+                appendLine("Method  ${relationship.formula}")
+                append("Authority  ${relationship.authority}")
+            }, IndicatorLevel.CHECK)
+        }
+
+        if (dashboard.rawOnlyChannels.isNotEmpty()) {
+            addCard(buildString {
+                appendLine("RAW-ONLY CHANNELS • NO PHYSICAL UNIT OR HEALTH CLAIM")
+                dashboard.rawOnlyChannels.take(RAW_CHANNEL_LIMIT).forEach { channel ->
+                    append(channel.identifierHex)
+                    append(" • ${channel.records} records • dynamic bytes ")
+                    append(channel.dynamicBytePositions.joinToString(prefix = "[", postfix = "]"))
+                    channel.firstBigEndianWord?.let { raw ->
+                        append(" • BE16 min ${raw.minimum} mean ${decimal(raw.mean, 1)} max ${raw.maximum}")
+                    }
+                    if (channel.candidateSemantics.isNotEmpty()) {
+                        append(" • research labels ${channel.candidateSemantics.joinToString()}")
+                    }
+                    appendLine()
+                }
+            }, IndicatorLevel.WAIT)
+        }
+
+        inspector.text = buildString {
+            appendLine("THREE VALUE CLASSES")
+            appendLine("1. STANDARDIZED: current SAE J1979 supported-PID response with units.")
+            appendLine("2. CANDIDATE UNITS: historical passive-CAN values transformed by a pinned cross-model hypothesis.")
+            appendLine("3. RAW ONLY: retained counts/bytes with no physical-unit or semantic claim.")
+            appendLine()
+            appendLine("DERIVED DATA")
+            appendLine("Correlation, ratio, variability, peak-to-peak, and CV are calculations over retained evidence. They are not vehicle health, gear, converter slip, brake pressure, or causal conclusions.")
+            appendLine()
+            appendLine("PACK AUTHORITY")
+            append(dashboard.candidateValuesAuthority)
         }
     }
 
@@ -1227,6 +1374,29 @@ class DiscoveryActivity : Activity() {
         appendLine("Research priority: ${item.researchPriority}/100")
         appendLine("Confidence: ${item.confidence?.let { decimal(it * 100.0) + "%" } ?: "NOT CALCULATED"}")
         appendLine("Captures: ${item.captureSessions} • records ${item.retainedRecords}")
+        item.rawFieldValues?.let { raw ->
+            appendLine()
+            appendLine("RETAINED FIELD VALUES")
+            appendLine("Formula: ${item.fieldFormula}")
+            appendLine(
+                "Raw min ${decimal(raw.minimum, 2)} • max ${decimal(raw.maximum, 2)} • " +
+                    "mean ${decimal(raw.mean, 2)} • std dev ${decimal(raw.standardDeviation, 2)}"
+            )
+            appendLine(
+                "Raw peak-to-peak ${decimal(raw.peakToPeak, 2)} • " +
+                    "CV ${raw.coefficientOfVariation?.let { decimal(it * 100.0, 2) + "%" } ?: "UNDEFINED"}"
+            )
+        }
+        if (item.candidateTransforms.isNotEmpty()) {
+            appendLine()
+            appendLine("UNVERIFIED TRANSFORMS")
+            item.candidateTransforms.forEach { transform ->
+                appendLine(
+                    "${transform.transformId}: mean ${decimal(transform.summary.mean, 2)} ${transform.unit} • " +
+                        "${transform.formula}"
+                )
+            }
+        }
         appendLine()
         appendLine("PROMOTION GATE")
         val gate = item.promotionChecklist
@@ -1242,6 +1412,16 @@ class DiscoveryActivity : Activity() {
         appendLine()
         appendLine("NEXT TEST")
         appendLine(item.nextValidation)
+        if (item.limitations.isNotBlank()) {
+            appendLine()
+            appendLine("LIMITATIONS")
+            appendLine(item.limitations)
+        }
+        if (item.sourceIds.isNotEmpty()) {
+            appendLine()
+            appendLine("PINNED SOURCES")
+            appendLine(item.sourceIds.joinToString())
+        }
         appendLine()
         append(item.authority)
     }
@@ -1359,6 +1539,7 @@ class DiscoveryActivity : Activity() {
 
     private enum class Section(val label: String) {
         OVERVIEW("Overview"),
+        UNITS("CAN Units"),
         SIGNALS("Live Signals"),
         TESTS("Test Library"),
         CAPTURES("Capture Sessions"),
@@ -1375,13 +1556,18 @@ class DiscoveryActivity : Activity() {
         val authorization: AndroidDiscoverySafetyAuthorization?,
         val safetyEvidence: AndroidDiscoverySafetyEvidence,
     )
-    private data class CandidateResult(val items: List<AndroidCandidateResearchItem>, val error: String?)
+    private data class CandidateResult(
+        val items: List<AndroidCandidateResearchItem>,
+        val unitsDashboard: CanUnitsDashboardProjection?,
+        val error: String?,
+    )
     private data class WorkspaceData(
         val loading: Boolean,
         val scope: DiscoveryEvidenceScope?,
         val summary: DiscoveryEvidenceSummary?,
         val report: CanDiscoveryReport?,
         val candidates: List<AndroidCandidateResearchItem>,
+        val unitsDashboard: CanUnitsDashboardProjection?,
         val candidateError: String?,
         val captures: List<PersistedAndroidDiscoveryCapture>,
         val activeCapture: PersistedAndroidDiscoveryCapture?,
@@ -1391,10 +1577,10 @@ class DiscoveryActivity : Activity() {
     ) {
         companion object {
             fun loading() = WorkspaceData(
-                true, null, null, null, emptyList(), null, emptyList(), null, emptyList(), emptyList(), null,
+                true, null, null, null, emptyList(), null, null, emptyList(), null, emptyList(), emptyList(), null,
             )
             fun failed(error: String) = WorkspaceData(
-                false, null, null, null, emptyList(), null, emptyList(), null, emptyList(), emptyList(), error,
+                false, null, null, null, emptyList(), null, null, emptyList(), null, emptyList(), emptyList(), error,
             )
         }
     }
@@ -1410,6 +1596,8 @@ class DiscoveryActivity : Activity() {
         private const val DISCOVERY_RECORD_LIMIT = 100_000
         private const val REPLAY_LOAD_RECORD_LIMIT = 10_000
         private const val CANDIDATE_WINDOW_SIZE = 20
+        private const val CANDIDATE_UNIT_SERIES_LIMIT = 12
+        private const val RAW_CHANNEL_LIMIT = 18
         private const val LIVE_FRESHNESS_MS = 5_000L
         private const val RUNTIME_RENDER_INTERVAL_MILLIS = 250L
         private const val REPLAY_UI_PROGRESS_INTERVAL = 2_048

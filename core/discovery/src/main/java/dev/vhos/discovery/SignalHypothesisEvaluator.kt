@@ -4,6 +4,7 @@ import com.google.gson.FieldNamingPolicy
 import com.google.gson.GsonBuilder
 import java.security.MessageDigest
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 data class CandidateValueSummary(
@@ -12,14 +13,33 @@ data class CandidateValueSummary(
     val maximum: Double,
     val mean: Double,
     val standardDeviation: Double,
-)
+) {
+    val peakToPeak: Double get() = maximum - minimum
+
+    val coefficientOfVariation: Double?
+        get() = mean.takeUnless { abs(it) < 1e-12 }?.let { standardDeviation / abs(it) }
+}
 
 data class CandidateTransformEvaluation(
     val transformId: String,
+    val scale: Double,
+    val offset: Double,
     val unit: String,
+    val formula: String,
     val sourceIds: List<String>,
     val summary: CandidateValueSummary,
     val provenance: DiscoveryEvidenceProvenanceBreakdown,
+)
+
+data class CandidateRelationshipEvaluation(
+    val relationshipId: String,
+    val leftHypothesisId: String,
+    val leftTransformId: String,
+    val rightHypothesisId: String,
+    val rightTransformId: String,
+    val maximumPairingDeltaMicroseconds: ULong,
+    val interpretation: String,
+    val productionValueDisplayAllowed: Boolean,
 )
 
 data class SignalHypothesisEvaluation(
@@ -31,6 +51,7 @@ data class SignalHypothesisEvaluation(
     val targetEvidenceStatus: String,
     val records: Int,
     val sessions: Int,
+    val fieldFormula: String?,
     val fieldValues: CandidateValueSummary?,
     val transformEvaluations: List<CandidateTransformEvaluation>,
     val sourceIds: List<String>,
@@ -52,6 +73,7 @@ data class SignalHypothesisEvaluationReport(
     val requiredBadge: String,
     val allowedSurface: String,
     val evaluations: List<SignalHypothesisEvaluation>,
+    val relationships: List<CandidateRelationshipEvaluation>,
 )
 
 class SignalHypothesisPack internal constructor(
@@ -184,6 +206,12 @@ object SignalHypothesisCatalog {
             require(relationship.leftTransformId in transformsByHypothesis.getValue(relationship.leftHypothesisId) &&
                 relationship.rightTransformId in transformsByHypothesis.getValue(relationship.rightHypothesisId)
             ) { "Signal relationship references an unknown transform." }
+            require(relationship.maximumPairingDeltaUs in 1..1_000_000) {
+                "Signal relationship pairing window is invalid."
+            }
+            require(relationship.interpretation.isNotBlank()) {
+                "Signal relationship interpretation is required."
+            }
         }
     }
 
@@ -250,12 +278,20 @@ object SignalHypothesisEvaluator {
                 sessions = matching.map {
                     Triple(it.sourceId, it.observation.sessionId, it.observation.extended)
                 }.toSet().size,
+                fieldFormula = hypothesis.field?.let(::fieldFormula),
                 fieldValues = extracted.takeIf(List<Double>::isNotEmpty)?.let(::summary),
                 transformEvaluations = hypothesis.candidateTransforms.mapNotNull { transform ->
                     extracted.takeIf(List<Double>::isNotEmpty)?.let { rawValues ->
                         CandidateTransformEvaluation(
                             transformId = transform.transformId,
+                            scale = transform.scale,
+                            offset = transform.offset,
                             unit = transform.unit,
+                            formula = transformFormula(
+                                hypothesis.field?.let(::fieldFormula) ?: "raw",
+                                transform.scale,
+                                transform.offset,
+                            ),
                             sourceIds = transform.sourceIds,
                             summary = summary(rawValues.map { it * transform.scale + transform.offset }),
                             provenance = DiscoveryEvidenceProvenanceBreakdown.from(matching),
@@ -281,8 +317,45 @@ object SignalHypothesisEvaluator {
             requiredBadge = REQUIRED_BADGE,
             allowedSurface = ALLOWED_SURFACE,
             evaluations = evaluations,
+            relationships = pack.document.relationships.map { relationship ->
+                CandidateRelationshipEvaluation(
+                    relationshipId = relationship.relationshipId,
+                    leftHypothesisId = relationship.leftHypothesisId,
+                    leftTransformId = relationship.leftTransformId,
+                    rightHypothesisId = relationship.rightHypothesisId,
+                    rightTransformId = relationship.rightTransformId,
+                    maximumPairingDeltaMicroseconds = relationship.maximumPairingDeltaUs.toULong(),
+                    interpretation = relationship.interpretation,
+                    productionValueDisplayAllowed = false,
+                )
+            },
         )
     }
+
+    private fun fieldFormula(field: CandidateField): String = buildString {
+        append(field.endianness.lowercase(Locale.US))
+        append(field.byteLength * 8)
+        append("(payload[")
+        append(field.byteOffset)
+        append("..")
+        append(field.byteOffset + field.byteLength - 1)
+        append("])")
+        append(" mask 0x")
+        append(field.mask.toString(16).uppercase(Locale.US))
+        append(" shift ")
+        append(field.rightShift)
+        field.signedBits?.let { append(" signed").append(it) }
+    }
+
+    private fun transformFormula(rawFormula: String, scale: Double, offset: Double): String =
+        when {
+            offset == 0.0 -> "($rawFormula) * ${number(scale)}"
+            offset > 0.0 -> "(($rawFormula) * ${number(scale)}) + ${number(offset)}"
+            else -> "(($rawFormula) * ${number(scale)}) - ${number(abs(offset))}"
+        }
+
+    private fun number(value: Double): String =
+        if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
 
     private fun extract(record: DiscoveryObservation, field: CandidateField): Long? {
         if (field.byteOffset + field.byteLength > record.observation.dataLength) return null
@@ -387,5 +460,7 @@ internal data class PackRelationship(
     val leftTransformId: String = "",
     val rightHypothesisId: String = "",
     val rightTransformId: String = "",
+    val maximumPairingDeltaUs: Long = -1,
+    val interpretation: String = "",
     val productionValueDisplayAllowed: Boolean = true,
 )

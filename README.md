@@ -54,6 +54,11 @@ The first vertical slice provides:
   transactional materialization of CRC-valid persistent capture records;
 - a versioned CAN Discovery dashboard for acquisition facts, sampled coverage, raw activity,
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
+- a dedicated **CAN Units** engineering dashboard that separates current supported SAE J1979
+  physical values from historical cross-model unit candidates and raw-only channels; it exposes
+  min/max/mean, standard deviation, peak-to-peak, coefficient of variation, exact field/transform
+  formulas, pack/source authority, and same-session 0x2C4↔0x2D0 ratio/correlation without making
+  engine, turbine, gear, slip, brake, or health claims;
 - a SHA-pinned **UNVERIFIED CROSS-MODEL HYPOTHESIS** research surface that evaluates retained
   listen-only bytes while keeping production display, automatic promotion, and digital-twin writes blocked;
 - a ranked **NEXT VALIDATION MISSIONS** surface that converts real target activity and source
