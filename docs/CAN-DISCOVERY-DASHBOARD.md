@@ -50,16 +50,33 @@ entry, RSSI, or unvalidated notification cannot create a dashboard observation.
 The Engineering workspace now includes a **CAN Units** section with three intentionally separate
 value classes:
 
-1. **Standardized SAE J1979** values are current only. They require the active validated VHOS
+1. **Live passive-CAN engineering values** exist only for complete, validated `RAW_CAN_FRAME`
+   observations that were durably inserted into the local evidence store. The transport retains a
+   maximum of 64 latest-per-identifier samples for the current GATT connection. Capture-log chunks,
+   remote requests, rejected rows, unpersisted rows, and samples older than five seconds cannot
+   populate this lane. Candidate values reuse the exact SHA-pinned hypothesis fields and transforms,
+   remain `UNVERIFIED CROSS-MODEL HYPOTHESIS`, show raw value/formula/sequence/age beside the proposed
+   unit, and disappear to unavailable rather than becoming zero. Every fresh identifier also receives
+   an exact raw-frame row; an ID with a pinned physical transform therefore has both the unverified
+   candidate card and its raw evidence, while all other IDs remain explicitly `RAW ONLY`. The inventory
+   is created from accepted observations, not an identifier allowlist, so static and changing
+   identifiers are both retained within the bound. A source or gateway capture-session change clears
+   the runtime inventory. Each row preserves
+   exact ID, DLC (including seven-byte `0x023` records), authoritative payload bytes, source sequence,
+   freshness, accepted observation count, accepted payload-change count, and the latest DLC/byte
+   delta. Average update rate is emitted only when at least two accepted observations share a gateway
+   session and its monotonic timeline advanced; the UI labels it `app-observed avg`, never true CAN
+   bus arrival rate. Changing rows sort ahead of static rows without assigning either a semantic.
+2. **Standardized SAE J1979** values are current only. They require the active validated VHOS
    contract, a complete supported-PID enumeration for the responding ECU, a positive Mode 01
    response, a pinned definition revision, and a fresh source timestamp. Missing proof produces an
    unavailable state, never zero.
-2. **Unverified cross-model candidate units** are historical projections over retained passive CAN.
+3. **Unverified cross-model candidate units** are historical projections over retained passive CAN.
    Every card prints the candidate semantic, CAN identifier, raw field expression, scale/offset
    formula, unit, source-pinned transform ID, evidence count, session count, min, max, mean,
    population standard deviation, peak-to-peak, coefficient of variation, pack hash, limitations,
    and the `UNVERIFIED CROSS-MODEL HYPOTHESIS` badge. Conflicting transforms remain separate cards.
-3. **Raw-only channels** show retained activity and unscaled `BE16[0]` statistics. They do not gain
+4. **Raw-only channels** show retained activity and unscaled `BE16[0]` statistics. They do not gain
    engineering units merely because a related-model label exists.
 
 The dashboard also projects the pack-declared `0x2C4`/`0x2D0` research relationship only when the
