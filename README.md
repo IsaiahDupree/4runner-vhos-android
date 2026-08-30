@@ -52,7 +52,10 @@ The first vertical slice provides:
 - a versioned CAN Discovery dashboard for acquisition facts, sampled coverage, raw activity,
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
 - a dedicated **CAN Units** engineering dashboard that separates current supported SAE J1979
-  physical values from historical cross-model unit candidates and raw-only channels; it exposes
+  physical values, fresh persisted live passive-CAN candidate values, historical cross-model unit
+  candidates, and raw-only channels; the live lane keeps at most 64 latest-per-identifier RAW_CAN
+  observations, expires them after five seconds, excludes retained downloads and unpersisted frames,
+  and reuses the exact SHA-pinned research-pack transforms. The dashboard also exposes
   min/max/mean, standard deviation, peak-to-peak, coefficient of variation, exact field/transform
   formulas, pack/source authority, and same-session 0x2C4↔0x2D0 ratio/correlation without making
   engine, turbine, gear, slip, brake, or health claims;

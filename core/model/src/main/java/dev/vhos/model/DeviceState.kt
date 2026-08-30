@@ -47,6 +47,41 @@ data class StandardObdReading(
     val definitionRevision: String,
 )
 
+/**
+ * Latest accepted live CAN observation after the complete VHOS frame and raw record were validated
+ * and the observation was durably inserted into the local evidence store.
+ *
+ * This is a bounded, session-local display projection. It is not restored after disconnect, is not
+ * a replacement for append-only evidence, and carries no accepted vehicle-signal meaning.
+ */
+data class PersistedLiveCanObservation(
+    val sourceId: String,
+    val receivedAtEpochMs: Long,
+    val sessionId: UInt,
+    val sourceSequence: ULong,
+    val gatewayMonotonicMicroseconds: ULong,
+    val bitrateBps: Int,
+    val identifier: UInt,
+    val extended: Boolean,
+    val dataLength: Int,
+    /** Eight-byte CAN storage shape; only [dataLength] bytes are authoritative payload. */
+    val data: List<Int>,
+) {
+    init {
+        require(sourceId.isNotBlank()) { "Live CAN source identity is required." }
+        require(receivedAtEpochMs > 0) { "Live CAN receipt time is invalid." }
+        require(bitrateBps == 250_000 || bitrateBps == 500_000) {
+            "Live CAN bitrate is unsupported."
+        }
+        require(identifier <= 0x1FFF_FFFFu && (extended || identifier <= 0x7FFu)) {
+            "Live CAN identifier is out of range."
+        }
+        require(dataLength in 0..8 && data.size == 8 && data.all { it in 0..255 }) {
+            "Live CAN payload shape is invalid."
+        }
+    }
+}
+
 data class DeviceSnapshot(
     val role: DeviceRole,
     val phase: ConnectionPhase,
@@ -91,6 +126,8 @@ data class DeviceSnapshot(
     val j1979EnumerationComplete: Boolean? = null,
     val j1979SupportedPidCount: Int = 0,
     val standardObdReadings: List<StandardObdReading> = emptyList(),
+    /** Latest-per-identifier persisted live RAW_CAN observations; never retained-history chunks. */
+    val liveCanObservations: List<PersistedLiveCanObservation> = emptyList(),
 ) {
     companion object {
         fun initial(role: DeviceRole): DeviceSnapshot = when (role) {

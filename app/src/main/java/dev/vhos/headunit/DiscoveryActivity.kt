@@ -45,6 +45,8 @@ import dev.vhos.discovery.HISTORICAL_REPLAY_LABEL
 import dev.vhos.discovery.HistoricalCanReplay
 import dev.vhos.discovery.HistoricalReplayProgress
 import dev.vhos.discovery.HistoricalReplayReport
+import dev.vhos.discovery.LiveCanEngineeringProjector
+import dev.vhos.discovery.LiveCanUnitsUiModelProjector
 import dev.vhos.discovery.SignalHypothesisCatalog
 import dev.vhos.discovery.SignalHypothesisEvaluator
 import dev.vhos.discovery.SignalResearchPlanner
@@ -89,6 +91,7 @@ class DiscoveryActivity : Activity() {
     @Volatile private var runtime = HeadUnitRuntime.snapshot()
     private var workspace = WorkspaceData.loading()
     private var replayState: ReplayState = ReplayState.Idle
+    private val signalHypothesisPack by lazy { SignalHypothesisCatalog.loadBundled() }
     private val bootId: String by lazy {
         File("/proc/sys/kernel/random/boot_id").readText().trim().also {
             require(it.isNotBlank()) { "Android boot identity is unavailable." }
@@ -246,7 +249,7 @@ class DiscoveryActivity : Activity() {
                     CandidateResult(emptyList(), null, null)
                 } else {
                     runCatching {
-                        val pack = SignalHypothesisCatalog.loadBundled()
+                        val pack = signalHypothesisPack
                         val evaluation = SignalHypothesisEvaluator.evaluate(observations, pack)
                         val plan = SignalResearchPlanner.plan(report, evaluation, pack)
                         CandidateResult(
@@ -446,6 +449,60 @@ class DiscoveryActivity : Activity() {
 
     private fun renderUnitsDashboard() {
         addTitle("CAN physical units + derived data")
+        val liveResult = runCatching {
+            val samples = runtime.obd.liveCanObservations.takeIf {
+                runtime.obd.phase == ConnectionPhase.STREAMING
+            }.orEmpty()
+            LiveCanUnitsUiModelProjector.project(
+                LiveCanEngineeringProjector.project(
+                    input = samples,
+                    pack = signalHypothesisPack,
+                    nowEpochMs = System.currentTimeMillis(),
+                    freshnessMillis = LIVE_FRESHNESS_MS,
+                )
+            )
+        }
+        liveResult.fold(
+            onSuccess = { live ->
+                addCard(buildString {
+                    appendLine("LIVE PASSIVE CAN • UNVERIFIED ENGINEERING")
+                    appendLine(live.summary)
+                    live.emptyReason?.let(::append)
+                }, if (live.emptyReason == null) IndicatorLevel.CHECK else IndicatorLevel.WAIT)
+                live.valueRows.take(LIVE_UNIT_VALUE_LIMIT).forEach { row ->
+                    addCard(buildString {
+                        appendLine(row.badge)
+                        appendLine(row.title)
+                        appendLine(row.valueText)
+                        appendLine(row.evidenceText)
+                        appendLine(row.formulaText)
+                        append("Authority  ${row.authority}")
+                    }, IndicatorLevel.CHECK)
+                }
+                if (live.valueRows.size > LIVE_UNIT_VALUE_LIMIT) {
+                    addCard(
+                        "${live.valueRows.size - LIVE_UNIT_VALUE_LIMIT} additional fresh candidate values are bounded in runtime state.",
+                        IndicatorLevel.WAIT,
+                    )
+                }
+                if (live.rawRows.isNotEmpty()) {
+                    addCard(buildString {
+                        appendLine("LIVE RAW-ONLY CHANNELS • NO UNIT OR HEALTH CLAIM")
+                        live.rawRows.take(LIVE_RAW_CHANNEL_LIMIT).forEach { row ->
+                            appendLine("${row.title} • ${row.payloadText} • ${row.evidenceText}")
+                        }
+                        append("Authority  ${live.rawRows.first().authority}")
+                    }, IndicatorLevel.WAIT)
+                }
+            },
+            onFailure = { error ->
+                addCard(
+                    "LIVE PASSIVE CAN • FAIL-CLOSED\n${error.message ?: error.javaClass.simpleName}",
+                    IndicatorLevel.BLOCKED,
+                )
+            },
+        )
+
         val standardReadings = currentStandardObdReadings(runtime)
         if (standardReadings.isEmpty()) {
             addCard(
@@ -1598,6 +1655,8 @@ class DiscoveryActivity : Activity() {
         private const val CANDIDATE_WINDOW_SIZE = 20
         private const val CANDIDATE_UNIT_SERIES_LIMIT = 12
         private const val RAW_CHANNEL_LIMIT = 18
+        private const val LIVE_UNIT_VALUE_LIMIT = 12
+        private const val LIVE_RAW_CHANNEL_LIMIT = 12
         private const val LIVE_FRESHNESS_MS = 5_000L
         private const val RUNTIME_RENDER_INTERVAL_MILLIS = 250L
         private const val REPLAY_UI_PROGRESS_INTERVAL = 2_048

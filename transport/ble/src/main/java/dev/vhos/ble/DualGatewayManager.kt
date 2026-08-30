@@ -30,6 +30,7 @@ import dev.vhos.model.DeviceDisplayIdentity
 import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.IndicatorLevel
+import dev.vhos.model.PersistedLiveCanObservation
 import dev.vhos.model.StandardObdReading
 import dev.vhos.model.VehicleMotion
 import dev.vhos.protocol.FrameStreamDecoder
@@ -596,6 +597,7 @@ private class GatewayGattConnection(
     private var vehicleMotionFrameSequence: ULong? = null
     private var vehicleMotionGatewayMonotonicMicroseconds: ULong? = null
     private var lastFrameAt: Long? = null
+    private var liveCanObservations: List<PersistedLiveCanObservation> = emptyList()
     private var reconnectCount = 0L
     private var descriptorSecurityRetries = 0
     private val j1979Accumulator = J1979Accumulator()
@@ -930,6 +932,7 @@ private class GatewayGattConnection(
         }
         when (frame.messageType) {
             MessageType.RAW_CAN_FRAME, MessageType.CAPTURE_LOG_CHUNK -> {
+                val receivedAtEpochMillis = System.currentTimeMillis()
                 val observations = try {
                     frame.decodeCanObservations()
                 } catch (error: PayloadException) {
@@ -943,6 +946,14 @@ private class GatewayGattConnection(
                     val inserted = evidenceScope?.let {
                         database.persistCanObservation(it, observation, parentFrame = frame)
                     } ?: false
+                    liveCanObservations = PersistedLiveCanReducer.accept(
+                        current = liveCanObservations,
+                        messageType = frame.messageType,
+                        sourceId = source.sourceId,
+                        observation = observation,
+                        receivedAtEpochMs = receivedAtEpochMillis,
+                        persisted = inserted,
+                    )
                     if (inserted && frame.messageType == MessageType.RAW_CAN_FRAME) vehicleFrames++
                     bitrateBps = observation.bitrateBps.toLong()
                 }
@@ -950,7 +961,7 @@ private class GatewayGattConnection(
                     current = captureLineage,
                     messageType = frame.messageType,
                     observations = observations,
-                    receivedAtEpochMillis = System.currentTimeMillis(),
+                    receivedAtEpochMillis = receivedAtEpochMillis,
                 )
             }
             MessageType.GATEWAY_HEALTH -> {
@@ -1094,6 +1105,7 @@ private class GatewayGattConnection(
                             definitionRevision = sample.definitionRevision,
                         )
                     },
+                liveCanObservations = liveCanObservations,
             )
         )
     }
