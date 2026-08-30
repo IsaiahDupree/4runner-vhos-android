@@ -28,6 +28,25 @@ import dev.vhos.digitaltwin.HeadUnitInventory
 import dev.vhos.digitaltwin.HealthAssessment
 import dev.vhos.digitaltwin.VehicleProfile
 import dev.vhos.digitaltwin.VehicleSystem
+import dev.vhos.maintenance.MaintenanceAuditAction
+import dev.vhos.maintenance.MaintenanceAuditEvent
+import dev.vhos.maintenance.MaintenanceEventType
+import dev.vhos.maintenance.MaintenanceIds
+import dev.vhos.maintenance.MaintenanceLedgerArchivePayload
+import dev.vhos.maintenance.MaintenanceKnowledge
+import dev.vhos.maintenance.MaintenanceDueProjection
+import dev.vhos.maintenance.MaintenanceDueProjector
+import dev.vhos.maintenance.MaintenanceRequirementAuthority
+import dev.vhos.maintenance.MaintenanceRequirementRevision
+import dev.vhos.maintenance.MaintenanceRequirementState
+import dev.vhos.maintenance.MaintenanceRecordRevision
+import dev.vhos.maintenance.MaintenanceRecordState
+import dev.vhos.maintenance.MaintenanceSearchQuery
+import dev.vhos.maintenance.StoredMaintenanceAttachment
+import dev.vhos.maintenance.VehicleAsset
+import dev.vhos.maintenance.VehicleComponentRevision
+import dev.vhos.maintenance.VehicleComponentState
+import dev.vhos.maintenance.VoidMaintenanceRecordRequest
 import dev.vhos.model.DeviceRole
 import dev.vhos.protocol.CanObservation
 import dev.vhos.protocol.GatewayFrame
@@ -42,6 +61,7 @@ import net.zetetic.database.sqlcipher.SQLiteDatabase
 import net.zetetic.database.sqlcipher.SQLiteOpenHelper
 import java.time.Instant
 import java.util.Base64
+import java.util.Locale
 import java.util.UUID
 
 data class EvidenceCounts(
@@ -263,6 +283,16 @@ class EvidenceDatabase private constructor(
         database.setForeignKeyConstraintsEnabled(true)
     }
 
+    override fun onOpen(database: SQLiteDatabase) {
+        super.onOpen(database)
+        // Schema-v12 databases created by an earlier development build may predate the trigger
+        // hardening. Creating IF-NOT-EXISTS guards on every writable open closes that gap without
+        // rewriting or reclassifying any stored maintenance fact.
+        if (!database.isReadOnly && database.version >= 12) {
+            createMaintenanceAppendOnlyTriggers(database)
+        }
+    }
+
     override fun onCreate(database: SQLiteDatabase) {
         database.execSQL(
             """
@@ -277,6 +307,7 @@ class EvidenceDatabase private constructor(
         )
         createScopedEvidenceTables(database)
         createDigitalTwinTables(database)
+        createMaintenanceTables(database)
         createDiscoveryTables(database)
     }
 
@@ -457,9 +488,28 @@ class EvidenceDatabase private constructor(
             addColumnIfMissing(database, "discovery_event_markers", "observed_boot_id", "TEXT")
             migratedVersion = 9
         }
+        if (migratedVersion == 9) {
+            // Maintenance history begins as new append-only tables. Existing evidence, profile,
+            // health, Discovery, source, and import rows are not rewritten or reclassified.
+            createMaintenanceTables(database)
+            migratedVersion = 10
+        }
+        if (migratedVersion == 10) {
+            // Planning rules are new append-only facts. Existing maintenance records remain
+            // service evidence, but intentionally do not become completion baselines by title.
+            createMaintenancePlanningTables(database)
+            migratedVersion = 11
+        }
+        if (migratedVersion == 11) {
+            // Receipt/photo bodies are immutable content-addressed facts. Existing record metadata
+            // remains valid; a missing body continues to be reported as unavailable, never zero.
+            createMaintenanceAttachmentTables(database)
+            migratedVersion = 12
+        }
         check(migratedVersion == newVersion) {
             "Evidence database migration $oldVersion -> $newVersion is not implemented; destructive migration is forbidden."
         }
+        if (newVersion >= 12) createMaintenanceAppendOnlyTriggers(database)
     }
 
     private fun addImportedEvidenceAuthorityColumns(database: SQLiteDatabase, table: String) {
@@ -579,6 +629,204 @@ class EvidenceDatabase private constructor(
         database.execSQL(
             "CREATE INDEX IF NOT EXISTS health_assessments_system ON health_assessments(system_id, id)"
         )
+    }
+
+    private fun createMaintenanceTables(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS vehicle_assets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              vehicle_id TEXT NOT NULL,
+              revision_id TEXT NOT NULL UNIQUE,
+              supersedes_revision_id TEXT UNIQUE,
+              asset_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(supersedes_revision_id) REFERENCES vehicle_assets(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS vehicle_component_revisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              vehicle_id TEXT NOT NULL,
+              component_id TEXT NOT NULL,
+              revision_id TEXT NOT NULL UNIQUE,
+              supersedes_revision_id TEXT UNIQUE,
+              system_id TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              component_state TEXT NOT NULL,
+              component_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(supersedes_revision_id) REFERENCES vehicle_component_revisions(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_record_revisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              record_id TEXT NOT NULL,
+              revision_id TEXT NOT NULL UNIQUE,
+              supersedes_revision_id TEXT UNIQUE,
+              vehicle_id TEXT NOT NULL,
+              vehicle_asset_revision_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              record_state TEXT NOT NULL,
+              title TEXT NOT NULL,
+              occurred_at TEXT NOT NULL,
+              odometer_value INTEGER,
+              odometer_unit TEXT,
+              provider_name TEXT,
+              cost_currency TEXT,
+              cost_minor_units INTEGER,
+              search_text TEXT NOT NULL,
+              record_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(supersedes_revision_id) REFERENCES maintenance_record_revisions(revision_id),
+              FOREIGN KEY(vehicle_asset_revision_id) REFERENCES vehicle_assets(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_record_systems (
+              revision_id TEXT NOT NULL,
+              system_id TEXT NOT NULL,
+              PRIMARY KEY(revision_id, system_id),
+              FOREIGN KEY(revision_id) REFERENCES maintenance_record_revisions(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_record_components (
+              revision_id TEXT NOT NULL,
+              component_id TEXT NOT NULL,
+              system_id TEXT NOT NULL,
+              component_name TEXT NOT NULL,
+              PRIMARY KEY(revision_id, component_id),
+              FOREIGN KEY(revision_id) REFERENCES maintenance_record_revisions(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_audit_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              audit_event_id TEXT NOT NULL UNIQUE,
+              vehicle_id TEXT NOT NULL,
+              record_id TEXT NOT NULL,
+              revision_id TEXT NOT NULL UNIQUE,
+              prior_revision_id TEXT,
+              action TEXT NOT NULL,
+              recorded_at TEXT NOT NULL,
+              audit_json TEXT NOT NULL,
+              FOREIGN KEY(revision_id) REFERENCES maintenance_record_revisions(revision_id),
+              FOREIGN KEY(prior_revision_id) REFERENCES maintenance_record_revisions(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS vehicle_assets_current ON " +
+                "vehicle_assets(vehicle_id, id DESC)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS vehicle_components_current ON " +
+                "vehicle_component_revisions(vehicle_id, component_id, id DESC)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS vehicle_components_system ON " +
+                "vehicle_component_revisions(vehicle_id, system_id, id DESC)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_records_vehicle_date ON " +
+                "maintenance_record_revisions(vehicle_id, occurred_at DESC, id DESC)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_records_history ON " +
+                "maintenance_record_revisions(vehicle_id, record_id, id)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_system_lookup ON " +
+                "maintenance_record_systems(system_id, revision_id)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_component_lookup ON " +
+                "maintenance_record_components(component_id, revision_id)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_audit_vehicle ON " +
+                "maintenance_audit_events(vehicle_id, recorded_at DESC, id DESC)"
+        )
+        createMaintenancePlanningTables(database)
+        createMaintenanceAttachmentTables(database)
+        createMaintenanceAppendOnlyTriggers(database)
+    }
+
+    private fun createMaintenancePlanningTables(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_requirement_revisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              requirement_id TEXT NOT NULL UNIQUE,
+              supersedes_requirement_id TEXT UNIQUE,
+              task_id TEXT NOT NULL,
+              vehicle_id TEXT NOT NULL,
+              vehicle_asset_revision_id TEXT NOT NULL,
+              authority TEXT NOT NULL,
+              requirement_state TEXT NOT NULL,
+              title TEXT NOT NULL,
+              requirement_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(supersedes_requirement_id) REFERENCES maintenance_requirement_revisions(requirement_id),
+              FOREIGN KEY(vehicle_asset_revision_id) REFERENCES vehicle_assets(revision_id)
+            )
+            """.trimIndent()
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_requirements_current ON " +
+                "maintenance_requirement_revisions(vehicle_id, task_id, id DESC)"
+        )
+        database.execSQL(
+            "CREATE INDEX IF NOT EXISTS maintenance_requirements_authority ON " +
+                "maintenance_requirement_revisions(vehicle_id, authority, requirement_state, id DESC)"
+        )
+    }
+
+    private fun createMaintenanceAttachmentTables(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_attachment_blobs (
+              sha256 TEXT PRIMARY KEY NOT NULL,
+              media_type TEXT NOT NULL,
+              byte_count INTEGER NOT NULL,
+              body BLOB NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+    }
+
+    /**
+     * The public maintenance APIs model corrections as successor revisions, but API discipline is
+     * not a sufficient integrity boundary. These triggers make the source ledger immutable even
+     * for accidental direct SQL, future code paths, and administrative tooling. Current views are
+     * projections over inserts; no legitimate maintenance operation updates or deletes a fact.
+     */
+    private fun createMaintenanceAppendOnlyTriggers(database: SQLiteDatabase) {
+        MAINTENANCE_APPEND_ONLY_TABLES.forEach { table ->
+            database.execSQL(
+                "CREATE TRIGGER IF NOT EXISTS ${table}_reject_update " +
+                    "BEFORE UPDATE ON $table BEGIN " +
+                    "SELECT RAISE(ABORT, '$table is append-only'); END"
+            )
+            database.execSQL(
+                "CREATE TRIGGER IF NOT EXISTS ${table}_reject_delete " +
+                    "BEFORE DELETE ON $table BEGIN " +
+                    "SELECT RAISE(ABORT, '$table is append-only'); END"
+            )
+        }
     }
 
     private fun createDiscoveryTables(database: SQLiteDatabase) {
@@ -985,6 +1233,996 @@ class EvidenceDatabase private constructor(
     @Synchronized
     fun exportDigitalTwin(exportedAt: Instant = Instant.now()): ByteArray =
         gson.toJson(digitalTwinSnapshot(exportedAt)).toByteArray(Charsets.UTF_8)
+
+    @Synchronized
+    fun appendVehicleAsset(asset: VehicleAsset): VehicleAsset {
+        asset.validate()
+        require(asset.activeVehiclePack == null) {
+            "Generic vehicle CRUD cannot activate a verified Vehicle Pack; trusted signed-pack ingestion is required."
+        }
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val current = currentVehicleAsset(database, asset.vehicleId)
+            require(asset.supersedesRevisionId == current?.revisionId) {
+                "Vehicle-asset revisions must append to the current revision."
+            }
+            current?.let {
+                require(!Instant.parse(asset.createdAt).isBefore(Instant.parse(it.createdAt))) {
+                    "Vehicle-asset revision time cannot move backwards."
+                }
+                require(asset.distanceUnit == it.distanceUnit) {
+                    "A vehicle's canonical distance unit is immutable; convert a reading explicitly before creating the vehicle or keep the original unit."
+                }
+                val previousOdometer = it.currentOdometer
+                if (previousOdometer != null) {
+                    val nextOdometer = requireNotNull(asset.currentOdometer) {
+                        "A known odometer cannot be cleared by a later vehicle revision."
+                    }
+                    require(nextOdometer.unit == previousOdometer.unit) {
+                        "Odometer units cannot change between vehicle revisions."
+                    }
+                    require(nextOdometer.value >= previousOdometer.value) {
+                        "Odometer cannot decrease; rollover or instrument replacement is not yet represented by this contract."
+                    }
+                }
+            }
+            database.insertOrThrow("vehicle_assets", null, ContentValues().apply {
+                put("vehicle_id", asset.vehicleId)
+                put("revision_id", asset.revisionId)
+                putNullable("supersedes_revision_id", asset.supersedesRevisionId)
+                put("asset_json", gson.toJson(asset))
+                put("created_at", asset.createdAt)
+            })
+            database.setTransactionSuccessful()
+            return asset
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun currentVehicleAssets(): List<VehicleAsset> {
+        val assets = mutableListOf<VehicleAsset>()
+        val seen = mutableSetOf<String>()
+        readableDatabase.query(
+            "vehicle_assets",
+            arrayOf("vehicle_id", "asset_json"),
+            null, null, null, null, "id DESC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (seen.add(cursor.getString(0))) assets += vehicleAsset(cursor.getString(1))
+            }
+        }
+        return assets
+    }
+
+    @Synchronized
+    fun currentVehicleAsset(vehicleId: String): VehicleAsset? {
+        MaintenanceIds.requireVehicle(vehicleId)
+        return currentVehicleAsset(readableDatabase, vehicleId)
+    }
+
+    private fun currentVehicleAsset(database: SQLiteDatabase, vehicleId: String): VehicleAsset? =
+        database.query(
+            "vehicle_assets",
+            arrayOf("asset_json"),
+            "vehicle_id = ?",
+            arrayOf(vehicleId),
+            null, null, "id DESC", "1",
+        ).use { cursor -> if (!cursor.moveToFirst()) null else vehicleAsset(cursor.getString(0)) }
+
+    @Synchronized
+    fun vehicleAssetHistory(vehicleId: String): List<VehicleAsset> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        val assets = mutableListOf<VehicleAsset>()
+        readableDatabase.query(
+            "vehicle_assets",
+            arrayOf("asset_json"),
+            "vehicle_id = ?",
+            arrayOf(vehicleId),
+            null, null, "id ASC",
+        ).use { cursor -> while (cursor.moveToNext()) assets += vehicleAsset(cursor.getString(0)) }
+        return assets
+    }
+
+    private fun vehicleAsset(json: String): VehicleAsset =
+        gson.fromJson(json, VehicleAsset::class.java).validate()
+
+    @Synchronized
+    fun appendVehicleComponent(component: VehicleComponentRevision): VehicleComponentRevision {
+        component.validate()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            requireNotNull(currentVehicleAsset(database, component.vehicleId)) {
+                "Vehicle asset does not exist."
+            }
+            val current = currentVehicleComponent(database, component.vehicleId, component.componentId)
+            require(component.supersedesRevisionId == current?.revisionId) {
+                "Component revisions must append to the current registry revision."
+            }
+            current?.let {
+                require(!Instant.parse(component.createdAt).isBefore(Instant.parse(it.createdAt))) {
+                    "Component revision time cannot move backwards."
+                }
+                if (it.state == VehicleComponentState.RETIRED) {
+                    require(component.state == VehicleComponentState.RETIRED) {
+                        "A retired physical component cannot be resurrected; register its replacement with a new component identity."
+                    }
+                    require(component.retiredAt == it.retiredAt) {
+                        "A component's retirement timestamp is immutable."
+                    }
+                }
+                if (it.state == VehicleComponentState.ACTIVE &&
+                    component.state == VehicleComponentState.RETIRED
+                ) {
+                    val activeChildren = currentVehicleComponents(
+                        database,
+                        component.vehicleId,
+                        includeRetired = false,
+                    ).filter { candidate -> candidate.parentComponentId == component.componentId }
+                    require(activeChildren.isEmpty()) {
+                        "Retire or re-parent active child components before retiring this component."
+                    }
+                }
+            }
+            component.parentComponentId?.let { parentId ->
+                val parent = requireNotNull(
+                    currentVehicleComponent(database, component.vehicleId, parentId)
+                ) { "Parent component is not registered for this vehicle." }
+                require(parent.state == VehicleComponentState.ACTIVE) {
+                    "A component cannot be attached to a retired parent."
+                }
+                var ancestor: VehicleComponentRevision? = parent
+                val visited = mutableSetOf(component.componentId)
+                while (ancestor != null) {
+                    require(visited.add(ancestor.componentId)) {
+                        "Component parentage cannot contain a cycle."
+                    }
+                    ancestor = ancestor.parentComponentId?.let { id ->
+                        currentVehicleComponent(database, component.vehicleId, id)
+                    }
+                }
+            }
+            database.insertOrThrow("vehicle_component_revisions", null, ContentValues().apply {
+                put("vehicle_id", component.vehicleId)
+                put("component_id", component.componentId)
+                put("revision_id", component.revisionId)
+                putNullable("supersedes_revision_id", component.supersedesRevisionId)
+                put("system_id", component.systemId)
+                put("display_name", component.displayName)
+                put("component_state", component.state.name)
+                put("component_json", gson.toJson(component))
+                put("created_at", component.createdAt)
+            })
+            database.setTransactionSuccessful()
+            return component
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun currentVehicleComponents(
+        vehicleId: String,
+        includeRetired: Boolean = false,
+    ): List<VehicleComponentRevision> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        return currentVehicleComponents(readableDatabase, vehicleId, includeRetired)
+    }
+
+    private fun currentVehicleComponents(
+        database: SQLiteDatabase,
+        vehicleId: String,
+        includeRetired: Boolean,
+    ): List<VehicleComponentRevision> {
+        val components = mutableListOf<VehicleComponentRevision>()
+        val seen = mutableSetOf<String>()
+        database.query(
+            "vehicle_component_revisions",
+            arrayOf("component_id", "component_json"),
+            "vehicle_id = ?",
+            arrayOf(vehicleId),
+            null, null, "id DESC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (!seen.add(cursor.getString(0))) continue
+                val component = vehicleComponent(cursor.getString(1))
+                if (includeRetired || component.state == VehicleComponentState.ACTIVE) {
+                    components += component
+                }
+            }
+        }
+        return components.sortedWith(compareBy({ it.systemId }, { it.displayName.lowercase(Locale.US) }))
+    }
+
+    @Synchronized
+    fun currentVehicleComponent(vehicleId: String, componentId: String): VehicleComponentRevision? {
+        MaintenanceIds.requireVehicle(vehicleId)
+        MaintenanceIds.requireComponent(componentId)
+        return currentVehicleComponent(readableDatabase, vehicleId, componentId)
+    }
+
+    private fun currentVehicleComponent(
+        database: SQLiteDatabase,
+        vehicleId: String,
+        componentId: String,
+    ): VehicleComponentRevision? = database.query(
+        "vehicle_component_revisions",
+        arrayOf("component_json"),
+        "vehicle_id = ? AND component_id = ?",
+        arrayOf(vehicleId, componentId),
+        null, null, "id DESC", "1",
+    ).use { cursor -> if (!cursor.moveToFirst()) null else vehicleComponent(cursor.getString(0)) }
+
+    @Synchronized
+    fun vehicleComponentHistory(
+        vehicleId: String,
+        componentId: String,
+    ): List<VehicleComponentRevision> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        MaintenanceIds.requireComponent(componentId)
+        val revisions = mutableListOf<VehicleComponentRevision>()
+        readableDatabase.query(
+            "vehicle_component_revisions",
+            arrayOf("component_json"),
+            "vehicle_id = ? AND component_id = ?",
+            arrayOf(vehicleId, componentId),
+            null, null, "id ASC",
+        ).use { cursor -> while (cursor.moveToNext()) revisions += vehicleComponent(cursor.getString(0)) }
+        return revisions
+    }
+
+    private fun vehicleComponent(json: String): VehicleComponentRevision =
+        gson.fromJson(json, VehicleComponentRevision::class.java).validate()
+
+    @Synchronized
+    fun createOwnerMaintenanceRequirement(
+        requirement: MaintenanceRequirementRevision,
+    ): MaintenanceRequirementRevision {
+        requirement.validate()
+        require(requirement.authority == MaintenanceRequirementAuthority.OWNER_CUSTOM &&
+            requirement.supersedesRequirementId == null &&
+            requirement.state == MaintenanceRequirementState.ACTIVE
+        ) { "Generic maintenance CRUD can create only initial owner-custom requirements." }
+        return appendMaintenanceRequirement(requirement, expectedCurrent = null)
+    }
+
+    @Synchronized
+    fun amendOwnerMaintenanceRequirement(
+        requirement: MaintenanceRequirementRevision,
+    ): MaintenanceRequirementRevision {
+        requirement.validate()
+        require(requirement.authority == MaintenanceRequirementAuthority.OWNER_CUSTOM &&
+            requirement.supersedesRequirementId != null &&
+            requirement.state == MaintenanceRequirementState.ACTIVE
+        ) { "Generic maintenance CRUD can amend only active owner-custom requirements." }
+        val current = requireNotNull(
+            currentMaintenanceRequirementByTask(writableDatabase, requirement.vehicleId, requirement.task.taskId)
+        ) { "Maintenance requirement does not exist." }
+        require(current.authority == MaintenanceRequirementAuthority.OWNER_CUSTOM) {
+            "Verified Vehicle Pack requirements are read-only."
+        }
+        return appendMaintenanceRequirement(requirement, expectedCurrent = current)
+    }
+
+    @Synchronized
+    fun voidOwnerMaintenanceRequirement(
+        vehicleId: String,
+        taskId: String,
+        actor: dev.vhos.maintenance.MaintenanceActor,
+        reason: String,
+        createdAt: Instant = Instant.now(),
+    ): MaintenanceRequirementRevision {
+        MaintenanceIds.requireVehicle(vehicleId)
+        MaintenanceIds.requireMaintenanceTask(taskId)
+        actor.validate()
+        require(reason.isNotBlank() && reason == reason.trim() && reason.length <= 2000)
+        val current = requireNotNull(
+            currentMaintenanceRequirementByTask(writableDatabase, vehicleId, taskId)
+        ) { "Maintenance requirement does not exist." }
+        require(current.authority == MaintenanceRequirementAuthority.OWNER_CUSTOM) {
+            "Verified Vehicle Pack requirements cannot be voided through generic CRUD."
+        }
+        require(current.state == MaintenanceRequirementState.ACTIVE)
+        val asset = requireNotNull(currentVehicleAsset(writableDatabase, vehicleId)) {
+            "Vehicle asset does not exist."
+        }
+        return appendMaintenanceRequirement(
+            current.copy(
+                requirementId = MaintenanceIds.requirement(),
+                supersedesRequirementId = current.requirementId,
+                vehicleAssetRevisionId = asset.revisionId,
+                applicability = current.applicability.copy(
+                    vehicleRevisionId = asset.revisionId,
+                    evaluatedAt = createdAt.toString(),
+                ),
+                state = MaintenanceRequirementState.VOIDED,
+                actor = actor,
+                createdAt = createdAt.toString(),
+                amendmentReason = reason,
+            ).validate(),
+            expectedCurrent = current,
+        )
+    }
+
+    /** Trusted pack ingestion path; intentionally not used by the generic owner UI. */
+    @Synchronized
+    fun installVerifiedMaintenanceRequirement(
+        requirement: MaintenanceRequirementRevision,
+    ): MaintenanceRequirementRevision {
+        requirement.validate()
+        require(requirement.authority == MaintenanceRequirementAuthority.VERIFIED_VEHICLE_PACK) {
+            "Verified ingestion requires VERIFIED_VEHICLE_PACK authority."
+        }
+        val asset = requireNotNull(currentVehicleAsset(writableDatabase, requirement.vehicleId)) {
+            "Vehicle asset does not exist."
+        }
+        val pack = requireNotNull(asset.activeVehiclePack) {
+            "No verified Vehicle Pack is active for this vehicle revision."
+        }
+        val rule = requireNotNull(requirement.verifiedRule)
+        require(pack.packId == rule.packId && pack.packVersion == rule.packVersion &&
+            pack.sourceManifestSha256 == rule.sourceManifestSha256
+        ) { "Verified requirement does not match the active Vehicle Pack receipt." }
+        val current = currentMaintenanceRequirementByTask(
+            writableDatabase,
+            requirement.vehicleId,
+            requirement.task.taskId,
+        )
+        require(current == null || current.authority == MaintenanceRequirementAuthority.VERIFIED_VEHICLE_PACK) {
+            "A verified requirement cannot silently replace an owner-custom task."
+        }
+        return appendMaintenanceRequirement(requirement, current)
+    }
+
+    private fun appendMaintenanceRequirement(
+        requirement: MaintenanceRequirementRevision,
+        expectedCurrent: MaintenanceRequirementRevision?,
+    ): MaintenanceRequirementRevision {
+        requirement.validate()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val asset = requireNotNull(currentVehicleAsset(database, requirement.vehicleId)) {
+                "Vehicle asset does not exist."
+            }
+            require(asset.revisionId == requirement.vehicleAssetRevisionId &&
+                requirement.applicability.vehicleRevisionId == asset.revisionId
+            ) { "Requirement must bind to the current vehicle configuration revision." }
+            val current = currentMaintenanceRequirementByTask(
+                database,
+                requirement.vehicleId,
+                requirement.task.taskId,
+            )
+            require(current?.requirementId == expectedCurrent?.requirementId &&
+                requirement.supersedesRequirementId == current?.requirementId
+            ) { "Requirement revisions must append to the current task revision." }
+            current?.let {
+                require(!Instant.parse(requirement.createdAt).isBefore(Instant.parse(it.createdAt)))
+                require(it.authority == requirement.authority) {
+                    "Requirement authority cannot change across revisions."
+                }
+            }
+            requirement.task.components.forEach { component ->
+                if (component.componentKnowledge == MaintenanceKnowledge.UNKNOWN) return@forEach
+                val registered = requireNotNull(
+                    currentVehicleComponent(database, requirement.vehicleId, requireNotNull(component.componentId))
+                ) { "Requirement component ${component.componentId} is not registered for this vehicle." }
+                require(registered.systemId == component.systemId)
+            }
+            database.insertOrThrow("maintenance_requirement_revisions", null, ContentValues().apply {
+                put("requirement_id", requirement.requirementId)
+                putNullable("supersedes_requirement_id", requirement.supersedesRequirementId)
+                put("task_id", requirement.task.taskId)
+                put("vehicle_id", requirement.vehicleId)
+                put("vehicle_asset_revision_id", requirement.vehicleAssetRevisionId)
+                put("authority", requirement.authority.name)
+                put("requirement_state", requirement.state.name)
+                put("title", requirement.task.title)
+                put("requirement_json", gson.toJson(requirement))
+                put("created_at", requirement.createdAt)
+            })
+            database.setTransactionSuccessful()
+            return requirement
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun currentMaintenanceRequirements(
+        vehicleId: String,
+        includeVoided: Boolean = false,
+    ): List<MaintenanceRequirementRevision> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        val selection = buildString {
+            append("requirement.vehicle_id = ? AND ")
+            append(CURRENT_MAINTENANCE_REQUIREMENT_SQL)
+            if (!includeVoided) append(" AND requirement.requirement_state = 'ACTIVE'")
+        }
+        return queryMaintenanceRequirements(selection, arrayOf(vehicleId), "requirement.id DESC")
+    }
+
+    @Synchronized
+    fun maintenanceRequirementHistory(
+        vehicleId: String,
+        taskId: String,
+    ): List<MaintenanceRequirementRevision> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        MaintenanceIds.requireMaintenanceTask(taskId)
+        return queryMaintenanceRequirements(
+            "requirement.vehicle_id = ? AND requirement.task_id = ?",
+            arrayOf(vehicleId, taskId),
+            "requirement.id ASC",
+        )
+    }
+
+    @Synchronized
+    fun maintenanceDueProjections(
+        vehicleId: String,
+        evaluatedAt: Instant = Instant.now(),
+        currentEngineHours: String? = null,
+    ): List<MaintenanceDueProjection> {
+        val asset = requireNotNull(currentVehicleAsset(vehicleId)) { "Vehicle asset does not exist." }
+        val records = currentMaintenanceRecords(vehicleId)
+        return currentMaintenanceRequirements(vehicleId).map { requirement ->
+            MaintenanceDueProjector.project(
+                requirement,
+                asset,
+                records,
+                evaluatedAt,
+                currentEngineHours,
+            )
+        }
+    }
+
+    private fun currentMaintenanceRequirementByTask(
+        database: SQLiteDatabase,
+        vehicleId: String,
+        taskId: String,
+    ): MaintenanceRequirementRevision? = database.rawQuery(
+        "SELECT requirement_json FROM maintenance_requirement_revisions AS requirement " +
+            "WHERE requirement.vehicle_id = ? AND requirement.task_id = ? AND " +
+            CURRENT_MAINTENANCE_REQUIREMENT_SQL + " ORDER BY requirement.id DESC LIMIT 1",
+        arrayOf(vehicleId, taskId),
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else maintenanceRequirement(cursor.getString(0))
+    }
+
+    private fun maintenanceRequirementById(
+        database: SQLiteDatabase,
+        requirementId: String,
+    ): MaintenanceRequirementRevision? = database.query(
+        "maintenance_requirement_revisions",
+        arrayOf("requirement_json"),
+        "requirement_id = ?",
+        arrayOf(requirementId),
+        null, null, null, "1",
+    ).use { cursor -> if (!cursor.moveToFirst()) null else maintenanceRequirement(cursor.getString(0)) }
+
+    private fun queryMaintenanceRequirements(
+        selection: String,
+        arguments: Array<String>,
+        orderBy: String,
+        limit: Int = 1000,
+    ): List<MaintenanceRequirementRevision> {
+        require(limit in 1..500_000)
+        val requirements = mutableListOf<MaintenanceRequirementRevision>()
+        readableDatabase.query(
+            "maintenance_requirement_revisions AS requirement",
+            arrayOf("requirement.requirement_json"),
+            selection,
+            arguments,
+            null, null, orderBy,
+            limit.toString(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) requirements += maintenanceRequirement(cursor.getString(0))
+        }
+        return requirements
+    }
+
+    private fun maintenanceRequirement(json: String): MaintenanceRequirementRevision =
+        gson.fromJson(json, MaintenanceRequirementRevision::class.java).validate()
+
+    @Synchronized
+    fun createMaintenanceRecord(record: MaintenanceRecordRevision): MaintenanceRecordRevision {
+        record.validate()
+        require(record.supersedesRevisionId == null && record.state == MaintenanceRecordState.ACTIVE) {
+            "Create requires an initial active maintenance revision."
+        }
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            requireCurrentVehicleAsset(database, record)
+            require(currentMaintenanceRecord(database, record.vehicleId, record.recordId) == null) {
+                "Maintenance record already exists."
+            }
+            insertMaintenanceRevision(database, record, MaintenanceAuditAction.CREATED)
+            database.setTransactionSuccessful()
+            return record
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun amendMaintenanceRecord(record: MaintenanceRecordRevision): MaintenanceRecordRevision {
+        record.validate()
+        require(record.state == MaintenanceRecordState.ACTIVE && record.supersedesRevisionId != null) {
+            "Amend requires a new active revision with a predecessor."
+        }
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            requireCurrentVehicleAsset(database, record)
+            val current = requireNotNull(
+                currentMaintenanceRecord(database, record.vehicleId, record.recordId)
+            ) { "Maintenance record does not exist." }
+            require(current.state == MaintenanceRecordState.ACTIVE) {
+                "A voided maintenance record cannot be amended."
+            }
+            require(record.supersedesRevisionId == current.revisionId) {
+                "Maintenance amendments must supersede the current revision."
+            }
+            require(!Instant.parse(record.createdAt).isBefore(Instant.parse(current.createdAt))) {
+                "Maintenance revision time cannot move backwards."
+            }
+            insertMaintenanceRevision(database, record, MaintenanceAuditAction.AMENDED)
+            database.setTransactionSuccessful()
+            return record
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun voidMaintenanceRecord(request: VoidMaintenanceRecordRequest): MaintenanceRecordRevision {
+        request.validate()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val current = requireNotNull(
+                currentMaintenanceRecord(database, request.vehicleId, request.recordId)
+            ) { "Maintenance record does not exist." }
+            require(current.state == MaintenanceRecordState.ACTIVE) {
+                "Maintenance record is already voided."
+            }
+            val asset = requireNotNull(currentVehicleAsset(database, request.vehicleId)) {
+                "Vehicle asset does not exist."
+            }
+            require(!Instant.parse(request.createdAt).isBefore(Instant.parse(current.createdAt))) {
+                "Void time cannot precede the current maintenance revision."
+            }
+            val voided = current.copy(
+                revisionId = MaintenanceIds.maintenanceRevision(),
+                supersedesRevisionId = current.revisionId,
+                vehicleAssetRevisionId = asset.revisionId,
+                state = MaintenanceRecordState.VOIDED,
+                actor = request.actor,
+                createdAt = request.createdAt,
+                amendmentReason = request.reason,
+            ).validate()
+            insertMaintenanceRevision(database, voided, MaintenanceAuditAction.VOIDED)
+            database.setTransactionSuccessful()
+            return voided
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun currentMaintenanceRecords(
+        vehicleId: String,
+        includeVoided: Boolean = false,
+        limit: Int = 500,
+    ): List<MaintenanceRecordRevision> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        require(limit in 1..1_000_000)
+        val selection = buildString {
+            append("record.vehicle_id = ? AND ")
+            append(CURRENT_MAINTENANCE_REVISION_SQL)
+            if (!includeVoided) append(" AND record.record_state = 'ACTIVE'")
+        }
+        return queryMaintenanceRecords(
+            selection = selection,
+            selectionArgs = arrayOf(vehicleId),
+            orderBy = "record.occurred_at DESC, record.id DESC",
+            limit = limit,
+        )
+    }
+
+    @Synchronized
+    fun maintenanceRecordHistory(
+        vehicleId: String,
+        recordId: String,
+    ): List<MaintenanceRecordRevision> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        MaintenanceIds.requireMaintenanceRecord(recordId)
+        return queryMaintenanceRecords(
+            selection = "record.vehicle_id = ? AND record.record_id = ?",
+            selectionArgs = arrayOf(vehicleId, recordId),
+            orderBy = "record.id ASC",
+            limit = 1000,
+        )
+    }
+
+    @Synchronized
+    fun searchMaintenanceRecords(query: MaintenanceSearchQuery): List<MaintenanceRecordRevision> {
+        query.validate()
+        val clauses = mutableListOf(
+            "record.vehicle_id = ?",
+            CURRENT_MAINTENANCE_REVISION_SQL,
+        )
+        val arguments = mutableListOf(query.vehicleId)
+        if (!query.includeVoided) clauses += "record.record_state = 'ACTIVE'"
+        query.text?.let {
+            clauses += "instr(record.search_text, ?) > 0"
+            arguments += it.lowercase(Locale.US)
+        }
+        if (query.eventTypes.isNotEmpty()) {
+            clauses += "record.event_type IN (${query.eventTypes.joinToString { "?" }})"
+            arguments += query.eventTypes.map(MaintenanceEventType::name)
+        }
+        query.systemId?.let {
+            clauses += "EXISTS (SELECT 1 FROM maintenance_record_systems AS system " +
+                "WHERE system.revision_id = record.revision_id AND system.system_id = ?)"
+            arguments += it
+        }
+        query.componentId?.let {
+            clauses += "EXISTS (SELECT 1 FROM maintenance_record_components AS component " +
+                "WHERE component.revision_id = record.revision_id AND component.component_id = ?)"
+            arguments += it
+        }
+        query.occurredFrom?.let {
+            clauses += "record.occurred_at >= ?"
+            arguments += it
+        }
+        query.occurredThrough?.let {
+            clauses += "record.occurred_at <= ?"
+            arguments += it
+        }
+        return queryMaintenanceRecords(
+            selection = clauses.joinToString(" AND "),
+            selectionArgs = arguments.toTypedArray(),
+            orderBy = "record.occurred_at DESC, record.id DESC",
+            limit = query.limit,
+        )
+    }
+
+    @Synchronized
+    fun maintenanceAuditTrail(
+        vehicleId: String,
+        recordId: String? = null,
+        limit: Int = 1000,
+    ): List<MaintenanceAuditEvent> {
+        MaintenanceIds.requireVehicle(vehicleId)
+        recordId?.let(MaintenanceIds::requireMaintenanceRecord)
+        require(limit in 1..1_000_000)
+        val events = mutableListOf<MaintenanceAuditEvent>()
+        readableDatabase.query(
+            "maintenance_audit_events",
+            arrayOf("audit_json"),
+            if (recordId == null) "vehicle_id = ?" else "vehicle_id = ? AND record_id = ?",
+            if (recordId == null) arrayOf(vehicleId) else arrayOf(vehicleId, recordId),
+            null, null, "id DESC", limit.toString(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                events += gson.fromJson(cursor.getString(0), MaintenanceAuditEvent::class.java).validate()
+            }
+        }
+        return events
+    }
+
+    /** Builds the complete immutable revision graph for a portable owner-controlled archive. */
+    @Synchronized
+    fun maintenanceArchivePayload(
+        vehicleId: String,
+        exportedAt: Instant = Instant.now(),
+    ): MaintenanceLedgerArchivePayload {
+        MaintenanceIds.requireVehicle(vehicleId)
+        val vehicleRevisions = vehicleAssetHistory(vehicleId)
+        require(vehicleRevisions.isNotEmpty()) { "Vehicle asset does not exist." }
+
+        val componentRevisions = mutableListOf<VehicleComponentRevision>()
+        readableDatabase.query(
+            "vehicle_component_revisions",
+            arrayOf("component_json"),
+            "vehicle_id = ?",
+            arrayOf(vehicleId),
+            null, null, "id ASC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) componentRevisions += vehicleComponent(cursor.getString(0))
+        }
+
+        val requirementRevisions = queryMaintenanceRequirements(
+            "requirement.vehicle_id = ?",
+            arrayOf(vehicleId),
+            "requirement.id ASC",
+            limit = 500_000,
+        )
+        val recordRevisions = queryMaintenanceRecords(
+            selection = "record.vehicle_id = ?",
+            selectionArgs = arrayOf(vehicleId),
+            orderBy = "record.id ASC",
+            limit = 1_000_000,
+        )
+        return MaintenanceLedgerArchivePayload(
+            vehicleId = vehicleId,
+            exportedAt = exportedAt.toString(),
+            vehicleAssetRevisions = vehicleRevisions,
+            componentRevisions = componentRevisions,
+            requirementRevisions = requirementRevisions,
+            recordRevisions = recordRevisions,
+            auditEvents = maintenanceAuditTrail(vehicleId, limit = 1_000_000).reversed(),
+        ).validate()
+    }
+
+    /**
+     * Writes a receipt/photo/document body once under its SHA-256 inside SQLCipher.
+     * Reusing the same bytes is idempotent; a conflicting media type is rejected rather than
+     * silently changing the meaning of an existing content address.
+     */
+    @Synchronized
+    fun storeMaintenanceAttachment(
+        bytes: ByteArray,
+        mediaType: String,
+        createdAt: Instant = Instant.now(),
+    ): StoredMaintenanceAttachment {
+        require(bytes.isNotEmpty()) { "An attachment cannot be empty." }
+        require(bytes.size <= MAX_MAINTENANCE_ATTACHMENT_BYTES) {
+            "Attachment exceeds the supported encrypted-storage limit."
+        }
+        require(mediaType.matches(Regex("^[a-z0-9][a-z0-9!#&^_.+-]{0,126}/[a-z0-9][a-z0-9!#&^_.+-]{0,126}$"))) {
+            "Attachment media type must be canonical lowercase type/subtype without parameters."
+        }
+        val body = bytes.copyOf()
+        val digest = EvidenceBundles.sha256(body)
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            database.query(
+                "maintenance_attachment_blobs",
+                arrayOf("media_type", "byte_count", "body"),
+                "sha256 = ?",
+                arrayOf(digest),
+                null, null, null, "1",
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    require(cursor.getString(0) == mediaType && cursor.getLong(1) == body.size.toLong() &&
+                        cursor.getBlob(2).contentEquals(body)
+                    ) { "Existing attachment content address conflicts with supplied bytes or media type." }
+                    database.setTransactionSuccessful()
+                    return StoredMaintenanceAttachment(digest, mediaType, body)
+                }
+            }
+            database.insertOrThrow("maintenance_attachment_blobs", null, ContentValues().apply {
+                put("sha256", digest)
+                put("media_type", mediaType)
+                put("byte_count", body.size.toLong())
+                put("body", body)
+                put("created_at", createdAt.toString())
+            })
+            database.setTransactionSuccessful()
+            return StoredMaintenanceAttachment(digest, mediaType, body)
+        } finally {
+            database.endTransaction()
+            body.fill(0)
+        }
+    }
+
+    @Synchronized
+    fun maintenanceAttachment(sha256: String): StoredMaintenanceAttachment? {
+        require(sha256.matches(Regex("^[0-9a-f]{64}$")))
+        return readableDatabase.query(
+            "maintenance_attachment_blobs",
+            arrayOf("media_type", "byte_count", "body"),
+            "sha256 = ?",
+            arrayOf(sha256),
+            null, null, null, "1",
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            val body = cursor.getBlob(2)
+            require(cursor.getLong(1) == body.size.toLong() && EvidenceBundles.sha256(body) == sha256) {
+                "Encrypted attachment body failed its length or SHA-256 check."
+            }
+            StoredMaintenanceAttachment(sha256, cursor.getString(0), body)
+        }
+    }
+
+    /** Returns every body referenced by the archive, failing if metadata points at missing bytes. */
+    @Synchronized
+    fun maintenanceAttachmentsForArchive(
+        payload: MaintenanceLedgerArchivePayload,
+    ): List<StoredMaintenanceAttachment> {
+        payload.validate()
+        return payload.referencedAttachmentSha256().sorted().map { sha256 ->
+            requireNotNull(maintenanceAttachment(sha256)) {
+                "Attachment $sha256 is marked available but its encrypted body is missing."
+            }
+        }
+    }
+
+    private fun requireCurrentVehicleAsset(
+        database: SQLiteDatabase,
+        record: MaintenanceRecordRevision,
+    ) {
+        val asset = requireNotNull(currentVehicleAsset(database, record.vehicleId)) {
+            "Vehicle asset does not exist."
+        }
+        require(asset.revisionId == record.vehicleAssetRevisionId) {
+            "Maintenance record must bind to the current vehicle-asset revision."
+        }
+        record.odometer?.let {
+            require(it.unit == asset.distanceUnit) {
+                "Maintenance and vehicle distance units must agree."
+            }
+        }
+        record.components.forEach { reference ->
+            if (reference.componentKnowledge == MaintenanceKnowledge.UNKNOWN) return@forEach
+            val registered = requireNotNull(
+                currentVehicleComponent(database, record.vehicleId, requireNotNull(reference.componentId))
+            ) { "Maintenance component ${reference.componentId} is not registered for this vehicle." }
+            require(registered.systemId == reference.systemId) {
+                "Maintenance component ${reference.componentId} belongs to ${registered.systemId}, not ${reference.systemId}."
+            }
+            require(registered.parentComponentId == reference.parentComponentId) {
+                "Maintenance component parentage must match the durable component registry."
+            }
+        }
+        record.completionClaims.forEach { claim ->
+            val requirement = requireNotNull(maintenanceRequirementById(database, claim.requirementId)) {
+                "Completion claim references an unknown maintenance requirement."
+            }
+            require(requirement.vehicleId == record.vehicleId &&
+                requirement.task.taskId == claim.taskId
+            ) { "Completion claim must reference a task on this vehicle." }
+            val verified = requirement.verifiedRule
+            if (verified == null) {
+                require(claim.ruleId == null && claim.packId == null && claim.packVersion == null) {
+                    "Owner-custom completion cannot claim Vehicle Pack lineage."
+                }
+            } else {
+                require(claim.ruleId == verified.ruleId && claim.packId == verified.packId &&
+                    claim.packVersion == verified.packVersion
+                ) { "Verified completion must retain the exact task, rule, and pack version." }
+                require(claim.trust != dev.vhos.maintenance.MaintenanceCompletionTrust.OWNER_ATTESTED) {
+                    "A verified Vehicle Pack baseline requires documented or verified evidence."
+                }
+            }
+        }
+    }
+
+    private fun insertMaintenanceRevision(
+        database: SQLiteDatabase,
+        record: MaintenanceRecordRevision,
+        action: MaintenanceAuditAction,
+    ) {
+        record.validate()
+        val audit = MaintenanceAuditEvent(
+            vehicleId = record.vehicleId,
+            recordId = record.recordId,
+            revisionId = record.revisionId,
+            priorRevisionId = record.supersedesRevisionId,
+            action = action,
+            actor = record.actor,
+            recordedAt = record.createdAt,
+            reason = record.amendmentReason,
+        ).validate()
+        database.insertOrThrow("maintenance_record_revisions", null, ContentValues().apply {
+            put("record_id", record.recordId)
+            put("revision_id", record.revisionId)
+            putNullable("supersedes_revision_id", record.supersedesRevisionId)
+            put("vehicle_id", record.vehicleId)
+            put("vehicle_asset_revision_id", record.vehicleAssetRevisionId)
+            put("event_type", record.eventType.name)
+            put("record_state", record.state.name)
+            put("title", record.title)
+            put("occurred_at", record.occurredAt)
+            val odometer = record.odometer
+            if (odometer == null) {
+                putNull("odometer_value")
+                putNull("odometer_unit")
+            } else {
+                put("odometer_value", odometer.value)
+                put("odometer_unit", odometer.unit.name)
+            }
+            putNullable("provider_name", record.provider?.name)
+            putNullable("cost_currency", record.totalCost?.currencyCode)
+            val totalCost = record.totalCost
+            if (totalCost == null) putNull("cost_minor_units")
+            else put("cost_minor_units", totalCost.minorUnits)
+            put("search_text", maintenanceSearchText(record))
+            put("record_json", gson.toJson(record))
+            put("created_at", record.createdAt)
+        })
+        record.systems.filter { it.knowledge == MaintenanceKnowledge.KNOWN }.forEach { system ->
+            database.insertOrThrow("maintenance_record_systems", null, ContentValues().apply {
+                put("revision_id", record.revisionId)
+                put("system_id", requireNotNull(system.systemId))
+            })
+        }
+        record.components.filter { it.componentKnowledge == MaintenanceKnowledge.KNOWN }.forEach { component ->
+            database.insertOrThrow("maintenance_record_components", null, ContentValues().apply {
+                put("revision_id", record.revisionId)
+                put("component_id", requireNotNull(component.componentId))
+                put("system_id", requireNotNull(component.systemId))
+                put("component_name", requireNotNull(component.displayName))
+            })
+        }
+        database.insertOrThrow("maintenance_audit_events", null, ContentValues().apply {
+            put("audit_event_id", audit.auditEventId)
+            put("vehicle_id", audit.vehicleId)
+            put("record_id", audit.recordId)
+            put("revision_id", audit.revisionId)
+            putNullable("prior_revision_id", audit.priorRevisionId)
+            put("action", audit.action.name)
+            put("recorded_at", audit.recordedAt)
+            put("audit_json", gson.toJson(audit))
+        })
+    }
+
+    private fun maintenanceSearchText(record: MaintenanceRecordRevision): String = buildList {
+        add(record.title)
+        record.notes?.let(::add)
+        record.provider?.let {
+            add(it.name)
+            it.invoiceNumber?.let(::add)
+        }
+        record.systems.mapNotNull { it.displayName }.forEach(::add)
+        record.components.mapNotNull { it.displayName }.forEach(::add)
+        record.lineItems.forEach {
+            add(it.description)
+            it.manufacturer?.let(::add)
+            it.partNumber?.let(::add)
+            it.specification?.let(::add)
+        }
+        record.measurements.forEach {
+            add(it.name)
+            add(it.value)
+        }
+        record.customFields.forEach {
+            add(it.label)
+            add(it.value)
+        }
+        record.attachments.forEach { add(it.displayName) }
+    }.joinToString("\n").lowercase(Locale.US)
+
+    private fun currentMaintenanceRecord(
+        database: SQLiteDatabase,
+        vehicleId: String,
+        recordId: String,
+    ): MaintenanceRecordRevision? = database.rawQuery(
+        "SELECT record.record_json FROM maintenance_record_revisions AS record " +
+            "WHERE record.vehicle_id = ? AND record.record_id = ? AND " +
+            CURRENT_MAINTENANCE_REVISION_SQL + " LIMIT 1",
+        arrayOf(vehicleId, recordId),
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else maintenanceRecord(cursor.getString(0))
+    }
+
+    private fun queryMaintenanceRecords(
+        selection: String,
+        selectionArgs: Array<String>,
+        orderBy: String,
+        limit: Int,
+    ): List<MaintenanceRecordRevision> {
+        val records = mutableListOf<MaintenanceRecordRevision>()
+        readableDatabase.query(
+            "maintenance_record_revisions AS record",
+            arrayOf("record.record_json"),
+            selection,
+            selectionArgs,
+            null, null, orderBy, limit.toString(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) records += maintenanceRecord(cursor.getString(0))
+        }
+        return records
+    }
+
+    private fun maintenanceRecord(json: String): MaintenanceRecordRevision =
+        gson.fromJson(json, MaintenanceRecordRevision::class.java).validate()
 
     @Synchronized
     fun persistFrame(
@@ -2559,7 +3797,24 @@ class EvidenceDatabase private constructor(
 
     companion object {
         internal const val DATABASE_NAME = "vhos-evidence.db"
-        private const val DATABASE_VERSION = 9
+        private const val DATABASE_VERSION = 12
+        private const val MAX_MAINTENANCE_ATTACHMENT_BYTES = 64 * 1024 * 1024
+        private val MAINTENANCE_APPEND_ONLY_TABLES = listOf(
+            "vehicle_assets",
+            "vehicle_component_revisions",
+            "maintenance_record_revisions",
+            "maintenance_record_systems",
+            "maintenance_record_components",
+            "maintenance_audit_events",
+            "maintenance_requirement_revisions",
+            "maintenance_attachment_blobs",
+        )
+        private const val CURRENT_MAINTENANCE_REVISION_SQL =
+            "NOT EXISTS (SELECT 1 FROM maintenance_record_revisions AS next " +
+                "WHERE next.supersedes_revision_id = record.revision_id)"
+        private const val CURRENT_MAINTENANCE_REQUIREMENT_SQL =
+            "NOT EXISTS (SELECT 1 FROM maintenance_requirement_revisions AS next " +
+                "WHERE next.supersedes_requirement_id = requirement.requirement_id)"
         private val CAPTURE_SESSION_COLUMNS = arrayOf(
             "session_id", "vehicle_scope_id", "vehicle_profile_revision_id", "capture_source_id",
             "test_template_id", "test_template_version", "test_template_snapshot_json",

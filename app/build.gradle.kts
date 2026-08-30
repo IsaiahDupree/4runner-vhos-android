@@ -10,8 +10,8 @@ android {
         applicationId = "dev.vhos.headunit"
         minSdk = 26
         targetSdk = 37
-        versionCode = 16
-        versionName = "0.1.0-dev.16"
+        versionCode = 17
+        versionName = "0.1.0-dev.17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -37,6 +37,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:maintenance"))
     implementation(project(":core:discovery"))
     implementation(project(":core:digitaltwin"))
     implementation(project(":core:model"))
@@ -46,4 +47,6 @@ dependencies {
     implementation(project(":data:store"))
     implementation(project(":transport:ble"))
     implementation("androidx.core:core:1.17.0")
+    implementation("com.google.code.gson:gson:2.14.0")
+    testImplementation("junit:junit:4.13.2")
 }

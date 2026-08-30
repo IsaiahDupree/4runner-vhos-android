@@ -11,6 +11,7 @@ android {
 dependencies {
     implementation(project(":core:discovery"))
     implementation(project(":core:digitaltwin"))
+    implementation(project(":core:maintenance"))
     implementation(project(":core:model"))
     implementation(project(":core:protocol"))
     implementation(project(":core:sync"))

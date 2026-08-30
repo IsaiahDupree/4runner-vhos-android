@@ -46,6 +46,12 @@
         <activity
             android:name=".DiscoveryActivity"
             android:exported="false" />
+        <activity
+            android:name=".MaintenanceActivity"
+            android:exported="false" />
+        <activity
+            android:name=".MaintenancePlanActivity"
+            android:exported="false" />
 
         <service
             android:name=".VehicleSessionService"
