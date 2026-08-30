@@ -34,6 +34,9 @@ class DeviceStateTest {
         )
         assertEquals(sample, snapshot.liveCanObservations.single())
         assertEquals(listOf(5, 226, 0, 31, 64, 128, 18, 166), sample.data)
+        assertEquals(1L, sample.observationCount)
+        assertEquals(0L, sample.payloadChangeCount)
+        assertEquals(0, sample.latestChangedByteMask)
     }
 
     @Test
@@ -50,6 +53,27 @@ class DeviceStateTest {
                 extended = false,
                 dataLength = 8,
                 data = listOf(5, 226),
+            )
+        }
+    }
+
+    @Test
+    fun impossibleRuntimeActivityClaimsFailClosed() {
+        assertThrows(IllegalArgumentException::class.java) {
+            PersistedLiveCanObservation(
+                sourceId = "esp32-9454c5b08d14",
+                receivedAtEpochMs = 1_755_538_664_000L,
+                sessionId = 627_753_796u,
+                sourceSequence = 3_793UL,
+                gatewayMonotonicMicroseconds = 8_959_637UL,
+                bitrateBps = 500_000,
+                identifier = 0x2C4u,
+                extended = false,
+                dataLength = 8,
+                data = listOf(5, 226, 0, 31, 64, 128, 18, 166),
+                observationCount = 1,
+                payloadChangeCount = 1,
+                latestChangedByteMask = 0x02,
             )
         }
     }

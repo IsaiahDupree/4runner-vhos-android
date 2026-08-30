@@ -55,7 +55,12 @@ The first vertical slice provides:
   physical values, fresh persisted live passive-CAN candidate values, historical cross-model unit
   candidates, and raw-only channels; the live lane keeps at most 64 latest-per-identifier RAW_CAN
   observations, expires them after five seconds, excludes retained downloads and unpersisted frames,
-  and reuses the exact SHA-pinned research-pack transforms. The dashboard also exposes
+  resets activity at every source/capture-session boundary, and reuses the exact SHA-pinned
+  research-pack transforms. Every recently observed identifier is inventory-driven rather than
+  allowlisted: every identifier gets an exact raw row, including IDs that also receive separate
+  pinned unverified unit/formula cards. Raw rows show ID, DLC, payload, sequence, age, accepted
+  observation/change counts, latest changed-byte mask, and a gateway-timeline-derived rate explicitly
+  labeled **app-observed** rather than true bus arrival rate. The dashboard also exposes
   min/max/mean, standard deviation, peak-to-peak, coefficient of variation, exact field/transform
   formulas, pack/source authority, and same-session 0x2C4↔0x2D0 ratio/correlation without making
   engine, turbine, gear, slip, brake, or health claims;

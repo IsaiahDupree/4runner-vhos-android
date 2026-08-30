@@ -469,27 +469,29 @@ class DiscoveryActivity : Activity() {
                     appendLine(live.summary)
                     live.emptyReason?.let(::append)
                 }, if (live.emptyReason == null) IndicatorLevel.CHECK else IndicatorLevel.WAIT)
-                live.valueRows.take(LIVE_UNIT_VALUE_LIMIT).forEach { row ->
+                live.valueRows.forEach { row ->
                     addCard(buildString {
                         appendLine(row.badge)
                         appendLine(row.title)
                         appendLine(row.valueText)
+                        appendLine(row.payloadText)
                         appendLine(row.evidenceText)
+                        appendLine(row.changeText)
                         appendLine(row.formulaText)
                         append("Authority  ${row.authority}")
                     }, IndicatorLevel.CHECK)
                 }
-                if (live.valueRows.size > LIVE_UNIT_VALUE_LIMIT) {
-                    addCard(
-                        "${live.valueRows.size - LIVE_UNIT_VALUE_LIMIT} additional fresh candidate values are bounded in runtime state.",
-                        IndicatorLevel.WAIT,
-                    )
-                }
                 if (live.rawRows.isNotEmpty()) {
                     addCard(buildString {
-                        appendLine("LIVE RAW-ONLY CHANNELS • NO UNIT OR HEALTH CLAIM")
-                        live.rawRows.take(LIVE_RAW_CHANNEL_LIMIT).forEach { row ->
-                            appendLine("${row.title} • ${row.payloadText} • ${row.evidenceText}")
+                        appendLine(
+                            "LIVE RAW IDENTIFIER INVENTORY ${live.rawRows.size} • " +
+                                "PINNED CANDIDATES ARE SEPARATE UNVERIFIED CARDS"
+                        )
+                        live.rawRows.forEach { row ->
+                            appendLine(row.title)
+                            appendLine("  ${row.payloadText}")
+                            appendLine("  ${row.evidenceText}")
+                            appendLine("  ${row.changeText}")
                         }
                         append("Authority  ${live.rawRows.first().authority}")
                     }, IndicatorLevel.WAIT)
@@ -1655,8 +1657,6 @@ class DiscoveryActivity : Activity() {
         private const val CANDIDATE_WINDOW_SIZE = 20
         private const val CANDIDATE_UNIT_SERIES_LIMIT = 12
         private const val RAW_CHANNEL_LIMIT = 18
-        private const val LIVE_UNIT_VALUE_LIMIT = 12
-        private const val LIVE_RAW_CHANNEL_LIMIT = 12
         private const val LIVE_FRESHNESS_MS = 5_000L
         private const val RUNTIME_RENDER_INTERVAL_MILLIS = 250L
         private const val REPLAY_UI_PROGRESS_INTERVAL = 2_048

@@ -56,8 +56,17 @@ value classes:
    remote requests, rejected rows, unpersisted rows, and samples older than five seconds cannot
    populate this lane. Candidate values reuse the exact SHA-pinned hypothesis fields and transforms,
    remain `UNVERIFIED CROSS-MODEL HYPOTHESIS`, show raw value/formula/sequence/age beside the proposed
-   unit, and disappear to unavailable rather than becoming zero. Fresh identifiers without a pinned
-   physical transform remain visibly raw-only.
+   unit, and disappear to unavailable rather than becoming zero. Every fresh identifier also receives
+   an exact raw-frame row; an ID with a pinned physical transform therefore has both the unverified
+   candidate card and its raw evidence, while all other IDs remain explicitly `RAW ONLY`. The inventory
+   is created from accepted observations, not an identifier allowlist, so static and changing
+   identifiers are both retained within the bound. A source or gateway capture-session change clears
+   the runtime inventory. Each row preserves
+   exact ID, DLC (including seven-byte `0x023` records), authoritative payload bytes, source sequence,
+   freshness, accepted observation count, accepted payload-change count, and the latest DLC/byte
+   delta. Average update rate is emitted only when at least two accepted observations share a gateway
+   session and its monotonic timeline advanced; the UI labels it `app-observed avg`, never true CAN
+   bus arrival rate. Changing rows sort ahead of static rows without assigning either a semantic.
 2. **Standardized SAE J1979** values are current only. They require the active validated VHOS
    contract, a complete supported-PID enumeration for the responding ECU, a positive Mode 01
    response, a pinned definition revision, and a fresh source timestamp. Missing proof produces an

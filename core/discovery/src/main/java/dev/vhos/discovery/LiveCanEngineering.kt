@@ -13,6 +13,8 @@ data class LiveCanEngineeringValue(
     val rawValue: Double,
     val value: Double,
     val unit: String,
+    val dataLength: Int,
+    val dataHex: String,
     val rawFieldFormula: String,
     val transformFormula: String,
     val transformId: String,
@@ -21,6 +23,11 @@ data class LiveCanEngineeringValue(
     val gatewayMonotonicMicroseconds: ULong,
     val receivedAtEpochMs: Long,
     val ageMillis: Long,
+    val observationCount: Long,
+    val payloadChangeCount: Long,
+    val updateRateHz: Double?,
+    val latestChangedByteIndices: List<Int>,
+    val latestDataLengthChanged: Boolean,
     val requiredBadge: String,
     val authority: String,
 ) {
@@ -39,6 +46,13 @@ data class LiveCanRawChannel(
     val gatewayMonotonicMicroseconds: ULong,
     val receivedAtEpochMs: Long,
     val ageMillis: Long,
+    val observationCount: Long,
+    val payloadChangeCount: Long,
+    val updateRateHz: Double?,
+    val latestChangedByteIndices: List<Int>,
+    val latestDataLengthChanged: Boolean,
+    /** True only when a separate pinned UNVERIFIED physical candidate is shown for this same ID. */
+    val hasPinnedPhysicalProjection: Boolean,
     val authority: String,
 ) {
     companion object {
@@ -58,7 +72,8 @@ data class LiveCanEngineeringProjection(
     val freshSamples: Int,
     val staleSamples: Int,
     val values: List<LiveCanEngineeringValue>,
-    val rawOnlyChannels: List<LiveCanRawChannel>,
+    /** Exact raw inventory for every fresh identifier, including IDs that also have pinned fields. */
+    val rawChannels: List<LiveCanRawChannel>,
 )
 
 /** Pure, fail-closed projection of the bounded runtime CAN snapshot. */
@@ -82,6 +97,9 @@ object LiveCanEngineeringProjector {
         require(input.map { Triple(it.sourceId, it.identifier, it.extended) }.distinct().size == input.size) {
             "Live CAN runtime input is not latest-per-identifier."
         }
+        require(input.map { it.sourceId to it.sessionId }.distinct().size <= 1) {
+            "Live CAN runtime input crosses a source or capture-session boundary."
+        }
 
         val ages = input.associateWith { sample ->
             (nowEpochMs - sample.receivedAtEpochMs).takeIf { it >= 0L }
@@ -101,7 +119,7 @@ object LiveCanEngineeringProjector {
                 freshSamples = 0,
                 staleSamples = input.size,
                 values = emptyList(),
-                rawOnlyChannels = emptyList(),
+                rawChannels = emptyList(),
             )
         }
 
@@ -141,6 +159,8 @@ object LiveCanEngineeringProjector {
                     rawValue = rawValue,
                     value = transform.summary.mean,
                     unit = transform.unit,
+                    dataLength = sample.dataLength,
+                    dataHex = dataHex(sample),
                     rawFieldFormula = requireNotNull(candidate.fieldFormula),
                     transformFormula = transform.formula,
                     transformId = transform.transformId,
@@ -149,12 +169,20 @@ object LiveCanEngineeringProjector {
                     gatewayMonotonicMicroseconds = sample.gatewayMonotonicMicroseconds,
                     receivedAtEpochMs = sample.receivedAtEpochMs,
                     ageMillis = requireNotNull(ages.getValue(sample)),
+                    observationCount = sample.observationCount,
+                    payloadChangeCount = sample.payloadChangeCount,
+                    updateRateHz = updateRateHz(sample),
+                    latestChangedByteIndices = changedByteIndices(sample.latestChangedByteMask),
+                    latestDataLengthChanged = sample.latestDataLengthChanged,
                     requiredBadge = evaluation.requiredBadge,
                     authority = LiveCanEngineeringValue.AUTHORITY,
                 )
             }
         }.sortedWith(
-            compareBy<LiveCanEngineeringValue> { it.identifier }
+            compareByDescending<LiveCanEngineeringValue> { it.payloadChangeCount > 0L }
+                .thenByDescending { it.payloadChangeCount }
+                .thenByDescending { it.observationCount }
+                .thenBy { it.identifier }
                 .thenBy { it.candidateId }
                 .thenBy { it.transformId }
         )
@@ -164,7 +192,7 @@ object LiveCanEngineeringProjector {
             candidate.transformEvaluations.filterNot { it.unit in rawUnits }
                 .map { definition.identifier.toUInt() to definition.extended }
         }.toSet()
-        val rawOnly = fresh.filter { (it.identifier to it.extended) !in physicalKeys }.map { sample ->
+        val rawChannels = fresh.map { sample ->
             LiveCanRawChannel(
                 identifier = sample.identifier,
                 identifierHex = identifierHex(sample.identifier, sample.extended),
@@ -176,9 +204,20 @@ object LiveCanEngineeringProjector {
                 gatewayMonotonicMicroseconds = sample.gatewayMonotonicMicroseconds,
                 receivedAtEpochMs = sample.receivedAtEpochMs,
                 ageMillis = requireNotNull(ages.getValue(sample)),
+                observationCount = sample.observationCount,
+                payloadChangeCount = sample.payloadChangeCount,
+                updateRateHz = updateRateHz(sample),
+                latestChangedByteIndices = changedByteIndices(sample.latestChangedByteMask),
+                latestDataLengthChanged = sample.latestDataLengthChanged,
+                hasPinnedPhysicalProjection = (sample.identifier to sample.extended) in physicalKeys,
                 authority = LiveCanRawChannel.AUTHORITY,
             )
-        }.sortedBy { it.identifier }
+        }.sortedWith(
+            compareByDescending<LiveCanRawChannel> { it.payloadChangeCount > 0L }
+                .thenByDescending { it.payloadChangeCount }
+                .thenByDescending { it.observationCount }
+                .thenBy { it.identifier }
+        )
 
         return LiveCanEngineeringProjection(
             contractVersion = CONTRACT_VERSION,
@@ -191,7 +230,7 @@ object LiveCanEngineeringProjector {
             freshSamples = fresh.size,
             staleSamples = input.size - fresh.size,
             values = values,
-            rawOnlyChannels = rawOnly,
+            rawChannels = rawChannels,
         )
     }
 
@@ -200,12 +239,32 @@ object LiveCanEngineeringProjector {
     } else {
         String.format(Locale.US, "0x%03X", identifier.toInt())
     }
+
+    private fun dataHex(sample: PersistedLiveCanObservation): String =
+        sample.data.take(sample.dataLength).joinToString(" ") {
+            String.format(Locale.US, "%02X", it)
+        }
+
+    private fun updateRateHz(sample: PersistedLiveCanObservation): Double? {
+        if (sample.observationCount < 2L ||
+            sample.gatewayMonotonicMicroseconds <= sample.firstGatewayMonotonicMicroseconds
+        ) return null
+        val elapsedMicroseconds =
+            sample.gatewayMonotonicMicroseconds - sample.firstGatewayMonotonicMicroseconds
+        return (sample.observationCount - 1L).toDouble() * 1_000_000.0 /
+            elapsedMicroseconds.toDouble()
+    }
+
+    private fun changedByteIndices(mask: Int): List<Int> =
+        (0..7).filter { index -> mask and (1 shl index) != 0 }
 }
 
 data class LiveCanEngineeringValueRow(
     val title: String,
     val valueText: String,
+    val payloadText: String,
     val evidenceText: String,
+    val changeText: String,
     val formulaText: String,
     val badge: String,
     val authority: String,
@@ -215,6 +274,7 @@ data class LiveCanRawRow(
     val title: String,
     val payloadText: String,
     val evidenceText: String,
+    val changeText: String,
     val authority: String,
 )
 
@@ -234,34 +294,87 @@ object LiveCanUnitsUiModelProjector {
                 "No persisted live RAW_CAN observations are available in this connection."
             value.freshSamples == 0 ->
                 "The latest persisted live RAW_CAN observations are stale; reconnect or wait for a fresh frame."
-            value.values.isEmpty() && value.rawOnlyChannels.isEmpty() ->
+            value.values.isEmpty() && value.rawChannels.isEmpty() ->
                 "Fresh CAN evidence has no displayable pinned candidate field or raw channel."
             else -> null
         }
         return LiveCanUnitsUiModel(
             status = value.status,
-            summary = "${value.freshSamples} fresh / ${value.totalRuntimeSamples} bounded samples • " +
+            summary = "${value.freshSamples} fresh identifiers / ${value.totalRuntimeSamples} bounded identifiers • " +
                 "freshness ${value.freshnessMillis} ms",
             emptyReason = emptyReason,
             valueRows = value.values.map { item ->
                 LiveCanEngineeringValueRow(
                     title = "${item.proposedSemantic ?: item.candidateId} • ${item.identifierHex}",
                     valueText = "${decimal(item.value)} ${item.unit}",
-                    evidenceText = "raw ${decimal(item.rawValue)} • seq ${item.sourceSequence} • age ${item.ageMillis} ms",
+                    payloadText = "DLC ${item.dataLength} • ${item.dataHex.ifBlank { "EMPTY PAYLOAD" }}",
+                    evidenceText = activityText(
+                        rawValue = item.rawValue,
+                        sourceSequence = item.sourceSequence,
+                        ageMillis = item.ageMillis,
+                        observationCount = item.observationCount,
+                        updateRateHz = item.updateRateHz,
+                    ),
+                    changeText = changeText(
+                        payloadChangeCount = item.payloadChangeCount,
+                        latestChangedByteIndices = item.latestChangedByteIndices,
+                        latestDataLengthChanged = item.latestDataLengthChanged,
+                    ),
                     formulaText = "${item.transformId} • ${item.transformFormula}",
                     badge = item.requiredBadge,
                     authority = item.authority,
                 )
             },
-            rawRows = value.rawOnlyChannels.map { item ->
+            rawRows = value.rawChannels.map { item ->
                 LiveCanRawRow(
-                    title = "${item.identifierHex} • RAW ONLY",
+                    title = if (item.hasPinnedPhysicalProjection) {
+                        "${item.identifierHex} • RAW FRAME + PINNED UNVERIFIED CANDIDATE"
+                    } else {
+                        "${item.identifierHex} • RAW ONLY"
+                    },
                     payloadText = "DLC ${item.dataLength} • ${item.dataHex.ifBlank { "EMPTY PAYLOAD" }}",
-                    evidenceText = "seq ${item.sourceSequence} • age ${item.ageMillis} ms",
+                    evidenceText = activityText(
+                        rawValue = null,
+                        sourceSequence = item.sourceSequence,
+                        ageMillis = item.ageMillis,
+                        observationCount = item.observationCount,
+                        updateRateHz = item.updateRateHz,
+                    ),
+                    changeText = changeText(
+                        payloadChangeCount = item.payloadChangeCount,
+                        latestChangedByteIndices = item.latestChangedByteIndices,
+                        latestDataLengthChanged = item.latestDataLengthChanged,
+                    ),
                     authority = item.authority,
                 )
             },
         )
+    }
+
+    private fun activityText(
+        rawValue: Double?,
+        sourceSequence: ULong,
+        ageMillis: Long,
+        observationCount: Long,
+        updateRateHz: Double?,
+    ): String = buildString {
+        rawValue?.let { append("raw ${decimal(it)} • ") }
+        append("seq $sourceSequence • age $ageMillis ms • app-persisted $observationCount")
+        updateRateHz?.let { append(" • app-observed avg ${decimal(it)} Hz") }
+    }
+
+    private fun changeText(
+        payloadChangeCount: Long,
+        latestChangedByteIndices: List<Int>,
+        latestDataLengthChanged: Boolean,
+    ): String {
+        val latest = buildList {
+            if (latestDataLengthChanged) add("DLC")
+            if (latestChangedByteIndices.isNotEmpty()) {
+                add("bytes ${latestChangedByteIndices.joinToString(",")}")
+            }
+        }.ifEmpty { listOf("none") }.joinToString(" + ")
+        return "payload changes $payloadChangeCount • latest Δ $latest"
     }
 
     private fun decimal(value: Double): String = String.format(Locale.US, "%.2f", value)

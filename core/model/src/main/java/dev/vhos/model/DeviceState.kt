@@ -66,6 +66,17 @@ data class PersistedLiveCanObservation(
     val dataLength: Int,
     /** Eight-byte CAN storage shape; only [dataLength] bytes are authoritative payload. */
     val data: List<Int>,
+    /** First accepted frame for this identifier in the current source/capture session. */
+    val firstObservedAtEpochMs: Long = receivedAtEpochMs,
+    val firstSourceSequence: ULong = sourceSequence,
+    val firstGatewayMonotonicMicroseconds: ULong = gatewayMonotonicMicroseconds,
+    /** Exact accepted/persisted live frame count for this identifier in this runtime session. */
+    val observationCount: Long = 1,
+    /** Number of accepted transitions whose authoritative DLC or payload changed. */
+    val payloadChangeCount: Long = 0,
+    /** Bit N means byte N changed in the newest accepted transition. */
+    val latestChangedByteMask: Int = 0,
+    val latestDataLengthChanged: Boolean = false,
 ) {
     init {
         require(sourceId.isNotBlank()) { "Live CAN source identity is required." }
@@ -78,6 +89,27 @@ data class PersistedLiveCanObservation(
         }
         require(dataLength in 0..8 && data.size == 8 && data.all { it in 0..255 }) {
             "Live CAN payload shape is invalid."
+        }
+        require(firstObservedAtEpochMs in 1..receivedAtEpochMs) {
+            "Live CAN first receipt time is invalid."
+        }
+        require(firstGatewayMonotonicMicroseconds <= gatewayMonotonicMicroseconds) {
+            "Live CAN gateway timeline regressed within a runtime activity record."
+        }
+        require(observationCount >= 1L && payloadChangeCount in 0 until observationCount) {
+            "Live CAN activity counters are invalid."
+        }
+        require(latestChangedByteMask in 0..0xFF) {
+            "Live CAN changed-byte mask is invalid."
+        }
+        if (observationCount == 1L) {
+            require(
+                firstSourceSequence == sourceSequence &&
+                    firstGatewayMonotonicMicroseconds == gatewayMonotonicMicroseconds &&
+                    payloadChangeCount == 0L &&
+                    latestChangedByteMask == 0 &&
+                    !latestDataLengthChanged
+            ) { "A first live CAN observation cannot claim earlier activity or change evidence." }
         }
     }
 }
@@ -126,7 +158,10 @@ data class DeviceSnapshot(
     val j1979EnumerationComplete: Boolean? = null,
     val j1979SupportedPidCount: Int = 0,
     val standardObdReadings: List<StandardObdReading> = emptyList(),
-    /** Latest-per-identifier persisted live RAW_CAN observations; never retained-history chunks. */
+    /**
+     * Latest-per-identifier persisted live RAW_CAN observations plus bounded activity/change facts;
+     * never retained-history chunks and never restored across a GATT/capture session.
+     */
     val liveCanObservations: List<PersistedLiveCanObservation> = emptyList(),
 ) {
     companion object {
