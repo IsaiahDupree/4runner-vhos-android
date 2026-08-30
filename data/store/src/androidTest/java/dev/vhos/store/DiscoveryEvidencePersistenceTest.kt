@@ -67,7 +67,7 @@ class DiscoveryEvidencePersistenceTest {
     @Test
     fun persistsOneActiveCaptureMarkersFinalizationAndCapabilityDeduplication() {
         val store = EvidenceDatabase.open(context)
-        assertEquals(9, store.readableDatabase.version)
+        assertEquals(12, store.readableDatabase.version)
         val scope = seedVehicleAndSource(store, PROFILE_ONE)
         val template = AndroidDiscoveryTestLibrary.requireTemplate(
             "vhos.discovery.brake-pulse",
@@ -790,7 +790,7 @@ class DiscoveryEvidencePersistenceTest {
             "source-local",
         )
 
-        assertEquals(9, store.readableDatabase.version)
+        assertEquals(12, store.readableDatabase.version)
         assertEquals(EvidenceCounts(1, 1), store.evidenceCounts(local))
         assertEquals(EvidenceCounts(0, 0), store.evidenceCounts(imported))
         assertEquals(EvidenceCounts(0, 0), store.evidenceCounts(mixed))

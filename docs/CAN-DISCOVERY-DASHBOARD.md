@@ -45,6 +45,51 @@ entry, RSSI, or unvalidated notification cannot create a dashboard observation.
 
 ## Display tiers
 
+### Dedicated CAN Units branch surface
+
+The Engineering workspace now includes a **CAN Units** section with three intentionally separate
+value classes:
+
+1. **Live passive-CAN engineering values** exist only for complete, validated `RAW_CAN_FRAME`
+   observations that were durably inserted into the local evidence store. The transport retains a
+   maximum of 64 latest-per-identifier samples for the current GATT connection. Capture-log chunks,
+   remote requests, rejected rows, unpersisted rows, and samples older than five seconds cannot
+   populate this lane. Candidate values reuse the exact SHA-pinned hypothesis fields and transforms,
+   remain `UNVERIFIED CROSS-MODEL HYPOTHESIS`, show raw value/formula/sequence/age beside the proposed
+   unit, and disappear to unavailable rather than becoming zero. Every fresh identifier also receives
+   an exact raw-frame row; an ID with a pinned physical transform therefore has both the unverified
+   candidate card and its raw evidence, while all other IDs remain explicitly `RAW ONLY`. The inventory
+   is created from accepted observations, not an identifier allowlist, so static and changing
+   identifiers are both retained within the bound. A source or gateway capture-session change clears
+   the runtime inventory. Each row preserves
+   exact ID, DLC (including seven-byte `0x023` records), authoritative payload bytes, source sequence,
+   freshness, accepted observation count, accepted payload-change count, and the latest DLC/byte
+   delta. Average update rate is emitted only when at least two accepted observations share a gateway
+   session and its monotonic timeline advanced; the UI labels it `app-observed avg`, never true CAN
+   bus arrival rate. Changing rows sort ahead of static rows without assigning either a semantic.
+2. **Standardized SAE J1979** values are current only. They require the active validated VHOS
+   contract, a complete supported-PID enumeration for the responding ECU, a positive Mode 01
+   response, a pinned definition revision, and a fresh source timestamp. Missing proof produces an
+   unavailable state, never zero.
+3. **Unverified cross-model candidate units** are historical projections over retained passive CAN.
+   Every card prints the candidate semantic, CAN identifier, raw field expression, scale/offset
+   formula, unit, source-pinned transform ID, evidence count, session count, min, max, mean,
+   population standard deviation, peak-to-peak, coefficient of variation, pack hash, limitations,
+   and the `UNVERIFIED CROSS-MODEL HYPOTHESIS` badge. Conflicting transforms remain separate cards.
+4. **Raw-only channels** show retained activity and unscaled `BE16[0]` statistics. They do not gain
+   engineering units merely because a related-model label exists.
+
+The dashboard also projects the pack-declared `0x2C4`/`0x2D0` research relationship only when the
+raw analyzer found at least ten nearest pairs from the same source and same capture session within
+250 ms. It reports pair count, Pearson correlation, median raw ratio, and—only when both candidate
+transforms share a unit and have zero offsets—the median candidate-unit ratio. This calculation is
+explicitly not identity, causation, engine/turbine proof, gear inference, converter-slip evidence,
+or a health conclusion.
+
+The core projector has no digital-twin write path and accepts only discovery reports with zero
+promoted definitions. `AndroidCandidateResearchItem` now retains field statistics, transforms,
+formulas, source IDs, and limitations instead of discarding them after research prioritization.
+
 ### Proven acquisition
 
 The following values resolve directly to persisted observation fields or source ordering:
@@ -184,6 +229,10 @@ The pure Kotlin analyzer is covered by golden records that exercise:
 The separate hypothesis evaluator additionally verifies the exact pack SHA-256, zero accepted
 definitions, research-only transforms over retained evidence, rejection of elevated authority, and
 rejection of input without listen-only proof.
+
+The CAN-units projection suite uses the checksum-pinned real 256-record fixture to verify the RPM
+candidate formula/statistics, raw-only `0x420` handling, retained adapter values, and the same-session
+`0x2C4`/`0x2D0` relationship. No fabricated vehicle value is used by the dashboard tests.
 
 The replay suites additionally cover a checksum-pinned real fixture, twenty repeated passes,
 hostile fragmentation, dropped notification fragments, corrupt payloads, mid-frame disconnects,

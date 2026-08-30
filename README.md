@@ -2,20 +2,18 @@
 
 ## Install on the head unit
 
-### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.15/app-debug.apk)
+### [DOWNLOAD VEHICLE HEALTH OS FOR ANDROID (.APK)](https://github.com/IsaiahDupree/4runner-vhos-android/releases/download/android-v0.1.0-dev.17/app-debug.apk)
 
-Current public development build: **0.1.0-dev.15** (`app-debug.apk`, 10,800,109 bytes; SHA-256
-`92f205af71e48a98f95de625120ef86391602946a549df923440fbfaa71d9225`). The link above
+Current public development build: **0.1.0-dev.17** (`app-debug.apk`, 11,457,023 bytes; SHA-256
+`f70b346b7fc7cbcd79443005841b86685bf816cb0c9faea5a3b1ecbafda53824`). The link above
 downloads the installer directly and does not require a GitHub account.
 
-This release adds vendor-compatible BLE recovery for Android head units that report scanner error
-3, 4, or 5 or return an empty service-filtered scan. Android first tries a saved validated gateway
-and the exact VHOS service filter, then performs one bounded software-qualified scan. Only the
-exact VHOS service UUID or approved VHOS device names are admitted, and encrypted GATT, CRC,
-gateway identity, protocol, role, and capability validation remain mandatory. The app also explains
-that the iPhone must release the deployed one-client ESP32 before Android can acquire it. All
-Discovery, replay, evidence-lineage, candidate, and fail-closed promotion behavior from dev.14 is
-retained.
+This release adds the vehicle-agnostic **Maintenance Garage** and **Maintenance Plan**. It stores
+vehicle configuration, component lifecycles, multi-component service/repair/inspection records,
+parts, fluids, measurements, costs, warranties, typed custom fields, receipts/photos, owner rules,
+due-state evidence, and complete correction history in the encrypted Android truth store. CAN Units,
+vendor BLE recovery, encrypted GATT validation, Discovery, replay, and fail-closed signal promotion
+remain intact.
 
 While the vehicle is parked:
 
@@ -25,7 +23,7 @@ While the vehicle is parked:
 4. Tap **Install**, then **Open**.
 
 [Open the public Release Hub](https://isaiahdupree.github.io/4runner-vhos-release-hub/) ·
-[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.15)
+[View release details and checksum](https://github.com/IsaiahDupree/4runner-vhos-android/releases/tag/android-v0.1.0-dev.17)
 
 ## Installed in the 4Runner
 
@@ -52,8 +50,35 @@ The first vertical slice provides:
 - encrypted GATT notification subscription before handshake negotiation;
 - append-only local storage for validated raw logical frames and CAN observations, including
   transactional materialization of CRC-valid persistent capture records;
+- a vehicle-agnostic **Maintenance Garage** backed by the encrypted Android truth store: owners can
+  create and revise vehicle assets; maintain physical-component lifecycle records; record service,
+  repair, inspection, replacement, fluid service, and notes; capture structured providers, costs,
+  parts/fluids, measurements, warranty terms, completion claims, attachments, and typed custom
+  fields; search/filter the current ledger; inspect immutable revision/audit history; and void an
+  incorrect record with a reason without deleting evidence;
+- a fail-closed **Maintenance Plan & Applicability** workspace for append-only vehicle-configuration
+  evidence, tri-state severe-use conditions, owner-custom maintenance rules, immutable rule history,
+  and reproducible `UNKNOWN`/`CURRENT`/`UPCOMING`/`DUE`/`OVERDUE` projections; verified vehicle-pack
+  rules are read-only and cannot be activated by an unreviewed draft source manifest;
+- bounded receipt/photo/PDF attachment capture through Android's system document picker, with each
+  body stored once as a SHA-256-addressed BLOB inside SQLCipher, plus deterministic encrypted
+  `.vhosmaintenance` export containing the complete vehicle/component/rule/record/audit graph and
+  referenced attachment bodies;
 - a versioned CAN Discovery dashboard for acquisition facts, sampled coverage, raw activity,
   candidate checksum families, repeated channels, and correlations without speculative vehicle labels;
+- a dedicated **CAN Units** engineering dashboard that separates current supported SAE J1979
+  physical values, fresh persisted live passive-CAN candidate values, historical cross-model unit
+  candidates, and raw-only channels; the live lane keeps at most 64 latest-per-identifier RAW_CAN
+  observations, expires them after five seconds, excludes retained downloads and unpersisted frames,
+  resets activity at every source/capture-session boundary, and reuses the exact SHA-pinned
+  research-pack transforms. Every recently observed identifier is inventory-driven rather than
+  allowlisted: every identifier gets an exact raw row, including IDs that also receive separate
+  pinned unverified unit/formula cards. Raw rows show ID, DLC, payload, sequence, age, accepted
+  observation/change counts, latest changed-byte mask, and a gateway-timeline-derived rate explicitly
+  labeled **app-observed** rather than true bus arrival rate. The dashboard also exposes
+  min/max/mean, standard deviation, peak-to-peak, coefficient of variation, exact field/transform
+  formulas, pack/source authority, and same-session 0x2C4↔0x2D0 ratio/correlation without making
+  engine, turbine, gear, slip, brake, or health claims;
 - a SHA-pinned **UNVERIFIED CROSS-MODEL HYPOTHESIS** research surface that evaluates retained
   listen-only bytes while keeping production display, automatic promotion, and digital-twin writes blocked;
 - a ranked **NEXT VALIDATION MISSIONS** surface that converts real target activity and source
@@ -82,7 +107,7 @@ The first vertical slice provides:
   timing-belt applicability guard;
 - a 22-system whole-vehicle health map that begins entirely `UNKNOWN / UNKNOWN` and requires
   immutable evidence before showing any health state;
-- non-destructive SQLCipher schema migrations through v7, including immutable
+- non-destructive SQLCipher schema migrations through v12, including immutable
   vehicle/profile/source bindings on raw logical/CAN evidence, scoped Android-internal Discovery
   captures/markers/capability observations, fail-closed legacy quarantine, and owner-controlled
   versioned digital-twin JSON export;
@@ -122,6 +147,43 @@ temperature, air flow, throttle position, and engine run time when the correspon
 present. The ESP32 remains in TWAI listen-only mode and Android has no diagnostic transmit API.
 During this milestone, responses are observed when an approved external client such as Toyota
 Techstream issues the read-only requests.
+
+## Maintenance Garage
+
+Open **Maintenance Garage** from the main head-unit controls. The landscape workspace keeps the
+vehicle selector and filters visible beside a maintenance timeline, current record detail, and the
+record's immutable revision/audit trail. **Components** manages installed and retired physical-part
+identities, while **Plan & configuration** manages configuration facts, severe-use evidence,
+owner-custom requirements, and due-state explanations. It supports any make/model/year and never
+assigns a 4Runner-specific service schedule to a generic vehicle.
+
+Android is the canonical local writer. **Edit vehicle** appends a vehicle-asset revision; **Amend**
+appends a maintenance-record revision and requires a reason; **Void** appends a void revision and
+preserves the original. An empty timeline means unrecorded/unknown—not healthy and not current.
+The iPhone companion should consume accepted Android records and audit receipts instead of becoming
+a second independent source of maintenance truth.
+
+All maintenance truth is stored app-private in the existing `vhos-evidence.db` SQLCipher database;
+its random passphrase is wrapped by Android Keystore. Receipt, photograph, PDF, and other selected
+document bytes are content-addressed in the `maintenance_attachment_blobs` SQLCipher table—not in a
+plaintext filesystem object directory. The UI can export one vehicle as a deterministic,
+checksummed `.vhosmaintenance` archive through Android's system document provider. The archive
+reader and integrity checks exist, but transactional archive import/restore is not yet exposed in
+the Garage UI.
+
+The official Toyota 2005 scheduled-maintenance source receipt and draft manifest remain deliberately
+inactive. Until every chart and footnote is normalized, configuration/severe-use applicability is
+complete, independent review is recorded, and a trusted pack is activated against the exact vehicle
+revision, Toyota-derived requirements cannot produce a due state. Owners may create clearly labeled
+`OWNER_CUSTOM` rules in the meantime; missing applicability or baseline evidence remains `UNKNOWN`.
+
+The persistence, archive, and UI paths have automated coverage. The remaining deployment acceptance
+work is a physical head-unit run of the system document picker/export flow and a complete
+transactional archive restore UI; neither is represented as complete by the app.
+
+See [docs/MAINTENANCE-GARAGE.md](docs/MAINTENANCE-GARAGE.md) for the UI workflow and evidence
+boundaries and [docs/MAINTENANCE-DATA-ARCHITECTURE.md](docs/MAINTENANCE-DATA-ARCHITECTURE.md) for
+the encrypted schema, revision semantics, rule authority, and portability contract.
 
 The synchronized Toyota-reference procedure and private iPhone evidence-outbox contract are recorded
 in the product repository's

@@ -190,6 +190,9 @@ class MainActivity : Activity() {
             "Export digital twin" to ::prepareDigitalTwinExport,
         ))
         controls.addView(controlRow(
+            "Open Maintenance Garage" to {
+                startActivity(Intent(this, MaintenanceActivity::class.java))
+            },
             "Open Discovery Engineering" to {
                 startActivity(Intent(this, DiscoveryActivity::class.java))
             },
@@ -1206,7 +1209,7 @@ class MainActivity : Activity() {
                 val security = store.securityStatus
                 appendLine("LOCAL EVIDENCE  ${snapshot.storedLogicalFrames} FRAMES")
                 appendLine("CAN observations: ${snapshot.storedCanObservations}")
-                appendLine("Database: append-only SQLCipher / WAL • schema v9")
+                appendLine("Database: append-only SQLCipher / WAL • schema v12")
                 appendLine("Encryption: ${security.cipherVersion} • KEYSTORE ENVELOPE v${security.keyEnvelopeVersion}")
                 appendLine("Key: ${security.keyProtection}")
                 appendLine("Migration: ${security.migrationState.displayName.uppercase(Locale.US)}")
