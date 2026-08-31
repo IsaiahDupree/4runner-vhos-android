@@ -124,6 +124,16 @@ The current OBD gateway can exercise the complete BLE path. The current A/C ESP3
 does not advertise BLE and will correctly remain `FIRMWARE NOT READY`; the app does not invent A/C
 data while that firmware milestone is pending.
 
+Development `main` now includes a fail-closed **A/C TEMPERATURE RUN** card for the requested
+start-to-maximum timing workflow. It shows start/current/maximum temperature in Celsius and
+Fahrenheit, live elapsed time, and `AC.TEMP.TIME_TO_MAX.v1`, with explicit Start, End, and Reset
+controls. Live results are provisional until End; missing evidence renders as dashes; and only
+`GOOD` center-vent observations with an applicable validated calibration may contribute. The card
+will remain **WAITING FOR SENSOR** until the external probe, BLE telemetry, and encrypted raw
+evidence path are commissioned. Board-die temperature is never substituted for vent temperature.
+See [docs/AC-TEMPERATURE-RUN-UI.md](docs/AC-TEMPERATURE-RUN-UI.md) for the calculation and UX
+boundaries.
+
 The deployed OBD firmware sends every framed response type over one encrypted multiplexed stream
 characteristic. Android enables exactly that one CCCD before requesting the handshake; the separate
 health and OTA characteristics remain registered for GATT compatibility but are not subscribed.

@@ -187,6 +187,7 @@ data class HeadUnitSnapshot(
     val status: String = "Vehicle session stopped.",
     val obd: DeviceSnapshot = DeviceSnapshot.initial(DeviceRole.OBD_CAN),
     val ac: DeviceSnapshot = DeviceSnapshot.initial(DeviceRole.AC_SENSOR),
+    val acThermalRun: AcThermalRunSnapshot = AcThermalRunSnapshot(),
     val storedLogicalFrames: Long = 0,
     val storedCanObservations: Long = 0,
     val lastExportAtEpochMs: Long? = null,

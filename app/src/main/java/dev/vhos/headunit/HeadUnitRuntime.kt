@@ -2,6 +2,7 @@ package dev.vhos.headunit
 
 import android.os.Handler
 import android.os.Looper
+import dev.vhos.model.AcThermalRunReducer
 import dev.vhos.model.DeviceRole
 import dev.vhos.model.DeviceSnapshot
 import dev.vhos.model.HeadUnitSnapshot
@@ -47,6 +48,18 @@ object HeadUnitRuntime {
 
     fun markExport(epochMs: Long) = update { it.copy(lastExportAtEpochMs = epochMs) }
     fun markImport(epochMs: Long) = update { it.copy(lastImportAtEpochMs = epochMs) }
+
+    fun startAcThermalRun(epochMillis: Long) = update {
+        it.copy(acThermalRun = AcThermalRunReducer.start(it.acThermalRun, epochMillis))
+    }
+
+    fun endAcThermalRun() = update {
+        it.copy(acThermalRun = AcThermalRunReducer.end(it.acThermalRun))
+    }
+
+    fun resetAcThermalRun() = update {
+        it.copy(acThermalRun = AcThermalRunReducer.reset())
+    }
 
     private fun update(transform: (HeadUnitSnapshot) -> HeadUnitSnapshot) {
         synchronized(this) { current = transform(current) }

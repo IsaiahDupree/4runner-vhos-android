@@ -69,6 +69,7 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var obdCard: TextView
     private lateinit var acCard: TextView
+    private lateinit var acThermalRunCard: TextView
     private lateinit var storageCard: TextView
     private lateinit var inventoryCard: TextView
     private lateinit var vehicleProfileCard: TextView
@@ -229,6 +230,19 @@ class MainActivity : Activity() {
         columns.addView(acCard, weightedCardParams())
         columns.addView(storageCard, weightedCardParams())
         root.addView(columns)
+
+        acThermalRunCard = card(17f)
+        root.addView(acThermalRunCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+        root.addView(controlRow(
+            "Start temperature run" to {
+                HeadUnitRuntime.startAcThermalRun(System.currentTimeMillis())
+            },
+            "End run" to HeadUnitRuntime::endAcThermalRun,
+            "Reset run" to HeadUnitRuntime::resetAcThermalRun,
+        ))
 
         discoveryCard = card(16f).apply {
             text = getString(R.string.can_discovery_wait)
@@ -1196,6 +1210,18 @@ class MainActivity : Activity() {
         obdCard.setTextColor(levelColor(snapshot.obd.level))
         acCard.text = deviceText(snapshot.ac)
         acCard.setTextColor(levelColor(snapshot.ac.level))
+        val thermalRun = acThermalRunUiState(snapshot.acThermalRun)
+        acThermalRunCard.text = buildString {
+            appendLine("A/C TEMPERATURE RUN  ${thermalRun.badge}")
+            appendLine(thermalRun.primaryMetric)
+            appendLine(thermalRun.temperatures)
+            appendLine(thermalRun.detail)
+            append(
+                "CENTER VENT • ${dev.vhos.model.AcThermalRunSnapshot.CALCULATION_ID} • " +
+                    "maximum is not stabilization; board-die temperature is excluded"
+            )
+        }
+        acThermalRunCard.setTextColor(levelColor(thermalRun.level))
         val store = database
         val storeError = storeInitializationError
         storageCard.text = when {
