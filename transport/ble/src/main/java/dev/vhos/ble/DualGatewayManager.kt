@@ -185,7 +185,7 @@ class DualGatewayManager(
     @SuppressLint("MissingPermission")
     private fun knownGatewayCandidates(): List<KnownGatewayCandidate> {
         val found = linkedMapOf<String, KnownGatewayCandidate>()
-        database.latestValidatedSources().forEach { source ->
+        database.latestValidatedSources().filter { it.role == DeviceRole.OBD_CAN }.forEach { source ->
             val device = try {
                 adapter?.getRemoteDevice(source.bluetoothAddress)
             } catch (_: IllegalArgumentException) {
@@ -204,6 +204,7 @@ class DualGatewayManager(
             if (found.containsKey(device.address)) return@forEach
             val name = safeDeviceName(device)
             val role = roleForApprovedName(name) ?: return@forEach
+            if (role != DeviceRole.OBD_CAN) return@forEach
             found[device.address] = KnownGatewayCandidate(
                 device = device,
                 advertisedName = name,

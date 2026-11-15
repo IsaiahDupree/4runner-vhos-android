@@ -7,11 +7,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import dev.vhos.ble.ACBatteryMonitor
 import dev.vhos.ble.DualGatewayManager
 import dev.vhos.store.EvidenceDatabase
 
 class VehicleSessionService : Service() {
     @Volatile private var gateways: DualGatewayManager? = null
+    @Volatile private var batteryMonitor: ACBatteryMonitor? = null
     @Volatile private var requestedAction: String = ACTION_STOP
     @Volatile private var initializing = false
     @Volatile private var destroyed = false
@@ -32,6 +34,7 @@ class VehicleSessionService : Service() {
             }
             ACTION_STOP -> {
                 requestedAction = ACTION_STOP
+                batteryMonitor?.stop()
                 gateways?.stop()
                 gatewaysClosed = true
                 HeadUnitRuntime.setRunning(false, "Vehicle session stopped.")
@@ -40,6 +43,7 @@ class VehicleSessionService : Service() {
             }
             ACTION_RELEASE -> {
                 requestedAction = ACTION_RELEASE
+                batteryMonitor?.stop()
                 gateways?.releaseForIPhone()
                 gatewaysClosed = true
                 HeadUnitRuntime.setRunning(false, "Gateway released for iPhone.")
@@ -52,7 +56,10 @@ class VehicleSessionService : Service() {
 
     override fun onDestroy() {
         destroyed = true
-        if (!gatewaysClosed) gateways?.stop()
+        if (!gatewaysClosed) {
+            batteryMonitor?.stop()
+            gateways?.stop()
+        }
         super.onDestroy()
     }
 
@@ -62,6 +69,7 @@ class VehicleSessionService : Service() {
         if (gateways != null) {
             gatewaysClosed = false
             gateways?.start()
+            batteryMonitor?.start()
             return
         }
         synchronized(this) {
@@ -81,14 +89,17 @@ class VehicleSessionService : Service() {
                         notification(snapshot.detail),
                     )
                 }
+                val battery = ACBatteryMonitor(this, database, HeadUnitRuntime::updateDevice)
                 synchronized(this) {
                     if (destroyed || requestedAction != ACTION_START) return@synchronized
+                    batteryMonitor = battery
                     gateways = manager
                     gatewaysClosed = false
                 }
                 if (gateways === manager && !destroyed && requestedAction == ACTION_START) {
                     HeadUnitRuntime.setRunning(true, "Encrypted evidence store verified; starting BLE discovery.")
                     manager.start()
+                    battery.start()
                 }
             } catch (error: Exception) {
                 val detail = "Encrypted evidence store blocked vehicle session: " +

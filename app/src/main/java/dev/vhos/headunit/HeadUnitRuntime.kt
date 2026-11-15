@@ -38,7 +38,7 @@ object HeadUnitRuntime {
     fun updateDevice(snapshot: DeviceSnapshot) = update { state ->
         when (snapshot.role) {
             DeviceRole.OBD_CAN -> state.copy(obd = snapshot, status = snapshot.detail)
-            DeviceRole.AC_SENSOR -> state.copy(ac = snapshot, status = snapshot.detail)
+            DeviceRole.AC_SENSOR -> state.copy(ac = snapshot)
         }
     }
 

@@ -163,6 +163,7 @@ data class DeviceSnapshot(
      * never retained-history chunks and never restored across a GATT/capture session.
      */
     val liveCanObservations: List<PersistedLiveCanObservation> = emptyList(),
+    val acBattery: ACBatteryReading? = null,
 ) {
     companion object {
         fun initial(role: DeviceRole): DeviceSnapshot = when (role) {

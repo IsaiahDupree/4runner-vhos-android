@@ -13,7 +13,8 @@ enum class MessageType(val code: Int) {
     EXPERIMENT_RESULT(10),
     CAPTURE_LOG_REQUEST(11),
     CAPTURE_LOG_INDEX(12),
-    CAPTURE_LOG_CHUNK(13);
+    CAPTURE_LOG_CHUNK(13),
+    AC_BATTERY(14);
 
     companion object {
         fun fromCode(code: Int): MessageType = entries.firstOrNull { it.code == code }

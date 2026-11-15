@@ -1208,7 +1208,7 @@ class MainActivity : Activity() {
         statusText.setTextColor(levelColor(if (snapshot.running) IndicatorLevel.ACTIVE else IndicatorLevel.WAIT))
         obdCard.text = deviceText(snapshot.obd)
         obdCard.setTextColor(levelColor(snapshot.obd.level))
-        acCard.text = deviceText(snapshot.ac)
+        acCard.text = batteryText(snapshot.ac)
         acCard.setTextColor(levelColor(snapshot.ac.level))
         val thermalRun = acThermalRunUiState(snapshot.acThermalRun)
         acThermalRunCard.text = buildString {
@@ -1359,6 +1359,30 @@ class MainActivity : Activity() {
         } else {
             append("Still required: ${profile.scheduleReadinessIssues().joinToString()}.")
         }
+    }
+
+    private fun batteryText(device: DeviceSnapshot): String = buildString {
+        appendLine("A/C LOGGER BATTERY")
+        appendLine(device.detail)
+        val battery = device.acBattery ?: return@buildString
+        val charge = battery.stateOfCharge
+        if (charge == null) {
+            appendLine("Gauge reading unavailable")
+            return@buildString
+        }
+        fun number(value: Double?, unit: String, places: Int) =
+            value?.let { "${decimal(it, places)} $unit" } ?: "Unavailable"
+        val flow = when {
+            (battery.averageMilliamps ?: 0.0) > 5 -> "Current into pack"
+            (battery.averageMilliamps ?: 0.0) < -5 -> "Discharging"
+            else -> "Idle"
+        }
+        appendLine("Charge estimate ${number(charge, "%", 0)}  •  $flow")
+        appendLine("Voltage ${number(battery.volts, "V", 3)}  •  Current ${number(battery.milliamps, "mA", 1)}")
+        appendLine("Power ${number(battery.signedWatts, "W", 2)}  •  Pack temperature estimate ${number(battery.packCelsius, "°C", 1)}")
+        appendLine("Remaining ${number(battery.remainingMilliampHours, "mAh", 0)}  •  Full-capacity estimate ${number(battery.fullMilliampHours, "mAh", 0)}")
+        appendLine("Capacity health estimate ${number(battery.healthPercent, "%", 0)}  •  Equivalent cycles ${number(battery.equivalentCycles, "", 2)}")
+        append("Time remaining ${number(battery.secondsToEmpty?.div(60), "min", 0)}  •  Time to full ${number(battery.secondsToFull?.div(60), "min", 0)}")
     }
 
     private fun deviceText(device: DeviceSnapshot): String = buildString {
